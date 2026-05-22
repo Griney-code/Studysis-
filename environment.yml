@@ -1,0 +1,12 @@
+name: studysis
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - ffmpeg
+  - git
+  - pip:
+      - -r backend/requirements.txt
+      - -r backend/requirements-dev.txt

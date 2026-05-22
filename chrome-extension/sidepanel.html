@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Studysis</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <div class="panel">
+      <header class="panel-header">
+        <div class="brand">
+          <img class="brand-logo" src="assets/icons/icon128.png" alt="Studysis" />
+          <div>
+            <h1>Studysis</h1>
+            <p>在线视频课程智能笔记总结系统</p>
+          </div>
+        </div>
+        <span id="statusBadge" class="status-badge idle">等待连接</span>
+      </header>
+
+      <section class="card">
+        <h2>当前页面</h2>
+        <p id="pageTitle" class="page-title">尚未检测到视频页面</p>
+        <p id="pageMeta" class="meta-text">请打开带有 HTML5 视频的网课页面</p>
+      </section>
+
+      <section class="card">
+        <h2>最新采样</h2>
+        <p id="segmentTime" class="meta-text">暂无分片数据</p>
+        <p id="segmentSubtitle" class="segment-subtitle">采集到的字幕会显示在这里</p>
+      </section>
+
+      <section class="card">
+        <h2>速览总结</h2>
+        <div id="quickSummary" class="summary-text">暂无速览总结</div>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>结构化笔记</h2>
+          <span id="notesCount" class="count-text">0 条</span>
+        </div>
+        <div id="notesList" class="note-list empty-state">暂无结构化笔记</div>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>备考考点清单</h2>
+          <span id="examCount" class="count-text">0 条</span>
+        </div>
+        <div id="examList" class="note-list empty-state">暂无考点清单</div>
+      </section>
+    </div>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

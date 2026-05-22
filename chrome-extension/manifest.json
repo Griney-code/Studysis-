@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "name": "Studysis Video Collector",
+  "version": "1.1.1",
+  "description": "Studysis 在线网课知识视频智能笔记总结系统 - Chrome 视频采集插件",
+  "permissions": [
+    "storage",
+    "tabs",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "assets/icons/icon128.png",
+    "32": "assets/icons/icon128.png",
+    "48": "assets/icons/icon128.png",
+    "128": "assets/icons/icon128.png"
+  },
+  "action": {
+    "default_title": "打开 Studysis 侧边栏",
+    "default_icon": {
+      "16": "assets/icons/icon128.png",
+      "32": "assets/icons/icon128.png",
+      "48": "assets/icons/icon128.png",
+      "128": "assets/icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.bilibili.com/*"
+      ],
+      "js": [
+        "page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "exclude_matches": [
+        "http://127.0.0.1:8000/*",
+        "http://localhost:8000/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}
