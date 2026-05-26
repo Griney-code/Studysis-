@@ -23,8 +23,13 @@ class Settings(BaseSettings):
     ai_timeout_seconds: float = 30.0
     ai_temperature: float = 0.2
     ai_max_tokens: int = 900
-    ai_outline_max_blocks: int = 80
-    ai_chapter_parallelism: int = 4
+    ai_outline_max_blocks: int = 48
+    ai_chapter_parallelism: int = 1
+    ai_enable_text_chapter_analysis: bool = True
+    ai_vision_max_tokens: int = 320
+    ai_vision_temperature: float = 0.1
+    ai_vision_images_per_chapter: int = 1
+    ai_vision_max_chapters: int = 0
 
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3:4b"
@@ -33,6 +38,7 @@ class Settings(BaseSettings):
     cloud_api_base_url: str = ""
     cloud_api_key: str = ""
     cloud_api_model: str = ""
+    cloud_vision_api_model: str = ""
     cloud_api_path: str = "/chat/completions"
     cloud_thinking_type: str = "disabled"
     cloud_clear_thinking: bool = True

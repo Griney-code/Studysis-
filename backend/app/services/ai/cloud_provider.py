@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
-from app.services.ai.base import AIProvider, AIProviderStatus, AITextResult
+from app.services.ai.base import AIImageInput, AIProvider, AIProviderStatus, AITextResult
 
 logger = logging.getLogger(__name__)
 
@@ -17,20 +17,27 @@ class CloudProvider(AIProvider):
 
     provider_name = "cloud"
 
+    def __init__(self, *, model_name: str | None = None, vision_enabled: bool = False) -> None:
+        self._model_name_override = (model_name or "").strip()
+        self._vision_enabled = vision_enabled
+
     def is_available(self) -> bool:
         return bool(
             settings.ai_enabled
             and settings.ai_provider == "cloud"
             and settings.cloud_api_base_url
             and settings.cloud_api_key
-            and settings.cloud_api_model
+            and self.get_model_name()
         )
 
     def get_model_name(self) -> str:
-        return settings.cloud_api_model
+        return self._model_name_override or settings.cloud_api_model
 
     def get_base_url(self) -> str:
         return settings.cloud_api_base_url
+
+    def supports_vision(self) -> bool:
+        return self._vision_enabled and self.is_available()
 
     def health_check(self) -> AIProviderStatus:
         if not self.is_available():
@@ -44,7 +51,7 @@ class CloudProvider(AIProvider):
                 message="Cloud provider is not fully configured or not enabled.",
             )
 
-        payload, headers, url = self._build_request(
+        payload, headers, url = self._build_text_request(
             system_prompt="You are a health check assistant.",
             user_prompt="Reply with OK only.",
             temperature=0.0,
@@ -120,21 +127,57 @@ class CloudProvider(AIProvider):
                 provider=self.provider_name,
             )
 
-        payload, headers, url = self._build_request(
+        payload, headers, url = self._build_text_request(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=response_format,
         )
+        return self._post_request(payload=payload, headers=headers, url=url)
 
+    def generate_multimodal(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        images: list[AIImageInput],
+        temperature: float,
+        max_tokens: int,
+        response_format: str | None = None,
+    ) -> AITextResult:
+        if not self.supports_vision():
+            return AITextResult(
+                success=False,
+                error="cloud vision provider unavailable",
+                provider=self.provider_name,
+            )
+
+        payload, headers, url = self._build_multimodal_request(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            images=images,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        return self._post_request(payload=payload, headers=headers, url=url)
+
+    def _post_request(
+        self,
+        *,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        url: str,
+    ) -> AITextResult:
         try:
-            with httpx.Client(timeout=settings.ai_timeout_seconds) as client:
-                response = client.post(url, headers=headers, json=payload)
-                response.raise_for_status()
-                data = response.json()
+            data = self._post_json_with_retry(
+                payload=payload,
+                headers=headers,
+                url=url,
+            )
         except Exception as error:
-            logger.warning("Cloud provider text generation failed: %s", error)
+            logger.warning("Cloud provider request failed: %s", error)
             return AITextResult(
                 success=False,
                 error=str(error),
@@ -159,7 +202,62 @@ class CloudProvider(AIProvider):
             provider=self.provider_name,
         )
 
-    def _build_request(
+    def _post_json_with_retry(
+        self,
+        *,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        url: str,
+    ) -> dict[str, Any]:
+        timeouts = self._build_timeout_schedule(payload)
+        last_error: Exception | None = None
+
+        for timeout_seconds in timeouts:
+            try:
+                with httpx.Client(timeout=timeout_seconds) as client:
+                    response = client.post(url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.ReadTimeout as error:
+                last_error = error
+                logger.warning(
+                    "Cloud provider read timeout after %.1fs, retrying if possible.",
+                    timeout_seconds,
+                )
+                continue
+
+        if last_error is not None:
+            raise last_error
+
+        base_timeout = max(settings.ai_timeout_seconds, 15.0)
+        with httpx.Client(timeout=base_timeout) as client:
+            response = client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            return response.json()
+
+    def _build_timeout_schedule(self, payload: dict[str, Any]) -> list[float]:
+        base_timeout = max(settings.ai_timeout_seconds, 15.0)
+        if self._payload_has_images(payload):
+            first_timeout = max(base_timeout, 50.0)
+            second_timeout = max(first_timeout + 30.0, base_timeout * 2.4)
+            return [first_timeout, second_timeout]
+
+        return [base_timeout, max(base_timeout + 20.0, base_timeout * 1.8)]
+
+    def _payload_has_images(self, payload: dict[str, Any]) -> bool:
+        messages = payload.get("messages") or []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "image_url":
+                    return True
+        return False
+
+    def _build_text_request(
         self,
         *,
         system_prompt: str,
@@ -168,17 +266,61 @@ class CloudProvider(AIProvider):
         max_tokens: int,
         response_format: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, str], str]:
-        base_url = settings.cloud_api_base_url.rstrip("/")
-        path = settings.cloud_api_path.strip() or "/chat/completions"
-        if not path.startswith("/"):
-            path = f"/{path}"
+        payload = self._build_base_payload(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        payload["messages"] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return payload, self._build_headers(), self._build_url()
 
+    def _build_multimodal_request(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        images: list[AIImageInput],
+        temperature: float,
+        max_tokens: int,
+        response_format: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str], str]:
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+        for image in images:
+            if not image.image_url:
+                continue
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image.image_url,
+                        "detail": image.detail,
+                    },
+                }
+            )
+
+        payload = self._build_base_payload(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        payload["messages"] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
+        ]
+        return payload, self._build_headers(), self._build_url()
+
+    def _build_base_payload(
+        self,
+        *,
+        temperature: float,
+        max_tokens: int,
+        response_format: str | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "model": settings.cloud_api_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            "model": self.get_model_name(),
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": False,
@@ -191,12 +333,20 @@ class CloudProvider(AIProvider):
             }
             if settings.cloud_clear_thinking:
                 payload["thinking"]["clear_thinking"] = True
+        return payload
 
-        headers = {
+    def _build_headers(self) -> dict[str, str]:
+        return {
             "Authorization": f"Bearer {settings.cloud_api_key}",
             "Content-Type": "application/json",
         }
-        return payload, headers, f"{base_url}{path}"
+
+    def _build_url(self) -> str:
+        base_url = settings.cloud_api_base_url.rstrip("/")
+        path = settings.cloud_api_path.strip() or "/chat/completions"
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return f"{base_url}{path}"
 
     def _extract_content(self, data: dict[str, Any]) -> str:
         output_text = data.get("output_text", "")

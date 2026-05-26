@@ -4,7 +4,11 @@ const CONFIG = {
   attachDebounceMs: 600,
   backendTimeoutMs: 15000,
   analysisPollIntervalMs: 2000,
-  analysisPollTimeoutMs: 10000
+  analysisPollTimeoutMs: 10000,
+  keyframeMaxCount: 8,
+  keyframeMinGapSeconds: 20,
+  keyframeImageWidth: 960,
+  keyframeImageQuality: 0.72
 };
 
 const EVENTS = {
@@ -26,7 +30,7 @@ const state = {
   videoScanTimer: null,
   attachBestVideoTimer: null,
   pageUrl: getSessionPageUrl(),
-  sessionId: createSessionId(),
+  sessionId: getOrCreateSessionId(getSessionPageUrl()),
   processedSegments: 0,
   lastKnownVideoTime: 0,
   backendConnected: false,
@@ -41,7 +45,10 @@ const state = {
   officialSubtitlePendingUrls: new Set(),
   bilibiliSubtitleDebug: null,
   analysisPollTimer: null,
-  analysisPollInFlight: false
+  analysisPollInFlight: false,
+  keyframeTimeBuckets: new Set(),
+  keyframeCountSent: 0,
+  lastKeyframeSeconds: -999
 };
 
 initCollector();
@@ -203,6 +210,8 @@ async function pollBackendSession() {
         processedSegments: state.processedSegments,
         error: "",
         lastSegment: null,
+        analysisRequestVersion: sessionData.analysis_request_version ?? sessionData.analysisRequestVersion ?? 0,
+        sessionUpdatedAt: sessionData.updated_at ?? sessionData.updatedAt ?? "",
         notes: normalizeBackendNotes(
           {
             data: {
@@ -418,6 +427,9 @@ function attachBestVideo() {
       backendConnected: state.backendConnected,
       error: ""
     });
+    if (shouldCaptureKeyframe(candidate, "paused")) {
+      void sendLightweightSnapshot("paused");
+    }
   };
 
   const onEnded = () => {
@@ -566,6 +578,8 @@ async function sendLightweightSnapshot(triggerReason, options = {}) {
           hasScreenshot: false,
           hasAudio: false
         },
+        analysisRequestVersion: data?.data?.analysis_request_version ?? data?.analysis_request_version ?? 0,
+        sessionUpdatedAt: data?.data?.session_updated_at ?? data?.session_updated_at ?? "",
         notes: normalizeBackendNotes(
           {
             ...data,
@@ -612,7 +626,7 @@ async function buildSnapshotPayload(triggerReason) {
 
   return {
     session_id: state.sessionId,
-    source: await buildSourcePayload(video),
+    source: await buildSourcePayload(video, triggerReason),
     segment: {
       start_time: 0,
       end_time: loadedUntil || currentTime,
@@ -627,7 +641,7 @@ async function buildSnapshotPayload(triggerReason) {
   };
 }
 
-async function buildSourcePayload(video) {
+async function buildSourcePayload(video, triggerReason) {
   const title = isBilibiliHost() ? collectBilibiliVideoTitle() : document.title;
   const description = isBilibiliHost() ? collectBilibiliVideoDescription() : collectPageDescription();
   const chapterTitles = isBilibiliHost() ? [] : collectChapterTitles();
@@ -635,6 +649,7 @@ async function buildSourcePayload(video) {
   const officialSubtitleTracks = !state.officialSubtitleSent ? cloneOfficialSubtitleTracks(state.officialSubtitleTracks) : [];
   const bufferedRanges = collectBufferedRanges(video);
   const subtitlePreview = !state.officialSubtitleSent ? buildOfficialSubtitlePreview(officialSubtitleTracks, 24) : [];
+  const keyframes = buildKeyframePayloads(video, triggerReason);
 
   return {
     title: title || document.title,
@@ -647,8 +662,101 @@ async function buildSourcePayload(video) {
     subtitle_candidates: subtitlePreview,
     official_subtitle_tracks: state.officialSubtitleSent ? [] : officialSubtitleTracks,
     bilibili_subtitle_debug: isBilibiliHost() ? cloneSubtitleDebugPayload(state.bilibiliSubtitleDebug) : {},
-    buffered_ranges: bufferedRanges
+    buffered_ranges: bufferedRanges,
+    keyframes
   };
+}
+
+function buildKeyframePayloads(video, triggerReason) {
+  if (!shouldCaptureKeyframe(video, triggerReason)) {
+    return [];
+  }
+
+  const keyframe = captureVideoKeyframe(video, triggerReason);
+  if (!keyframe) {
+    return [];
+  }
+
+  const bucket = `${triggerReason}:${Math.floor((keyframe.captured_at_seconds || 0) / 10)}`;
+  state.keyframeTimeBuckets.add(bucket);
+  state.keyframeCountSent += 1;
+  state.lastKeyframeSeconds = keyframe.captured_at_seconds || state.lastKeyframeSeconds;
+  return [keyframe];
+}
+
+function shouldCaptureKeyframe(video, triggerReason) {
+  if (!video) {
+    return false;
+  }
+
+  if (!["video-attached", "seeked", "paused", "playback-start"].includes(triggerReason)) {
+    return false;
+  }
+
+  if (state.keyframeCountSent >= CONFIG.keyframeMaxCount) {
+    return false;
+  }
+
+  if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) {
+    return false;
+  }
+
+  const currentTime = roundSeconds(getReliableVideoTime());
+  if (!Number.isFinite(currentTime)) {
+    return false;
+  }
+
+  const bucket = `${triggerReason}:${Math.floor(currentTime / 10)}`;
+  if (state.keyframeTimeBuckets.has(bucket)) {
+    return false;
+  }
+
+  if (
+    triggerReason !== "seeked"
+    && currentTime - state.lastKeyframeSeconds < CONFIG.keyframeMinGapSeconds
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function captureVideoKeyframe(video, triggerReason) {
+  try {
+    const sourceWidth = Number(video?.videoWidth ?? 0);
+    const sourceHeight = Number(video?.videoHeight ?? 0);
+    if (!sourceWidth || !sourceHeight) {
+      return null;
+    }
+
+    const targetWidth = Math.min(CONFIG.keyframeImageWidth, sourceWidth);
+    const targetHeight = Math.max(1, Math.round((targetWidth / sourceWidth) * sourceHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) {
+      return null;
+    }
+
+    context.drawImage(video, 0, 0, targetWidth, targetHeight);
+    const imageDataUrl = canvas.toDataURL("image/jpeg", CONFIG.keyframeImageQuality);
+    if (!imageDataUrl || imageDataUrl.length < 64) {
+      return null;
+    }
+
+    const capturedAtSeconds = roundSeconds(getReliableVideoTime());
+    return {
+      captured_at_seconds: capturedAtSeconds,
+      time_label: formatTime(capturedAtSeconds),
+      capture_reason: triggerReason,
+      image_data_url: imageDataUrl,
+      width: targetWidth,
+      height: targetHeight
+    };
+  } catch (_error) {
+    return null;
+  }
 }
 
 function isBilibiliHost() {
@@ -731,7 +839,7 @@ function refreshSessionForPageChange() {
 
   clearAnalysisPolling();
   state.pageUrl = currentPageUrl;
-  state.sessionId = createSessionId();
+  state.sessionId = getOrCreateSessionId(currentPageUrl);
   state.processedSegments = 0;
   state.lastKnownVideoTime = 0;
   state.lastSnapshotSignature = "";
@@ -746,6 +854,9 @@ function refreshSessionForPageChange() {
   state.officialSubtitleMetaByUrl = new Map();
   state.officialSubtitlePendingUrls = new Set();
   state.bilibiliSubtitleDebug = createEmptySubtitleDebugState();
+  state.keyframeTimeBuckets = new Set();
+  state.keyframeCountSent = 0;
+  state.lastKeyframeSeconds = -999;
   requestBilibiliSubtitleCollection("page-change");
 }
 
@@ -1031,17 +1142,7 @@ async function syncStatus({ status, backendConnected, error }) {
       status,
       backendConnected,
       processedSegments: state.processedSegments,
-      error,
-      notes: {
-        quickSummary: "",
-        overviewSummary: "",
-        liveSummary: "",
-        structuredNotes: [],
-        detailedNotes: [],
-        examPoints: [],
-        markdown: "",
-        backendMessage: ""
-      }
+      error
     }
   });
 }
@@ -1077,10 +1178,21 @@ function normalizeNoteArray(items, fallbackSeconds) {
     title: item.title ?? `笔记 ${index + 1}`,
     content: item.content ?? "",
     detail: item.detail ?? "",
+    imageUrls: normalizeImageUrlArray(item.image_urls ?? item.imageUrls ?? []),
     category: item.category ?? "章节导览",
     timestamp: item.timestamp ?? formatTime(fallbackSeconds),
     seconds: typeof item.seconds === "number" ? item.seconds : fallbackSeconds
   }));
+}
+
+function normalizeImageUrlArray(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  return items
+    .map((item) => sanitizeText(item))
+    .filter(Boolean);
 }
 
 function seekCurrentVideo(seconds) {
@@ -1199,4 +1311,29 @@ function roundSeconds(value) {
 
 function createSessionId() {
   return `studysis-${location.host}-${Date.now()}`;
+}
+
+function getOrCreateSessionId(pageUrl) {
+  const storageKey = buildPageSessionStorageKey(pageUrl);
+
+  try {
+    const existing = window.sessionStorage.getItem(storageKey);
+    if (existing) {
+      return existing;
+    }
+  } catch (_error) {
+    // Ignore sessionStorage failures and fall back to in-memory generation.
+  }
+
+  const sessionId = createSessionId();
+  try {
+    window.sessionStorage.setItem(storageKey, sessionId);
+  } catch (_error) {
+    // Ignore sessionStorage failures and keep using the generated id.
+  }
+  return sessionId;
+}
+
+function buildPageSessionStorageKey(pageUrl) {
+  return `studysis:session:${pageUrl}`;
 }

@@ -20,6 +20,17 @@ class OfficialSubtitleTrack(BaseModel):
     segments: list[OfficialSubtitleCue] = Field(default_factory=list, description="Subtitle cue list")
 
 
+class KeyframePayload(BaseModel):
+    """One captured keyframe from the video element."""
+
+    captured_at_seconds: float = Field(default=0, ge=0, description="Capture time in seconds")
+    time_label: str = Field(default="", description="Display label for the capture time")
+    capture_reason: str = Field(default="", description="Why the keyframe was captured")
+    image_data_url: str = Field(default="", description="Data URL of the captured image")
+    width: int = Field(default=0, ge=0, description="Image width")
+    height: int = Field(default=0, ge=0, description="Image height")
+
+
 class SourceInfo(BaseModel):
     """Lightweight page source information."""
 
@@ -40,6 +51,7 @@ class SourceInfo(BaseModel):
         description="Debug payload for Bilibili subtitle collection",
     )
     buffered_ranges: list[str] = Field(default_factory=list, description="Loaded video ranges")
+    keyframes: list[KeyframePayload] = Field(default_factory=list, description="Captured keyframes")
 
 
 class CaptureSnapshot(BaseModel):
@@ -91,6 +103,16 @@ class CollectSegmentRequest(BaseModel):
                         }
                     ],
                     "buffered_ranges": ["00:00 - 05:20"],
+                    "keyframes": [
+                        {
+                            "captured_at_seconds": 125.4,
+                            "time_label": "02:05",
+                            "capture_reason": "paused",
+                            "image_data_url": "data:image/jpeg;base64,...",
+                            "width": 960,
+                            "height": 540,
+                        }
+                    ],
                 },
                 "segment": {
                     "start_time": 0,

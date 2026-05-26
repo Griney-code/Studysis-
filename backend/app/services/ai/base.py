@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 
 @dataclass
 class AITextResult:
-    """统一的文本生成结果。"""
+    """Unified text generation result."""
 
     success: bool
     text: str = ""
@@ -15,8 +15,16 @@ class AITextResult:
 
 
 @dataclass
+class AIImageInput:
+    """One image passed to a multimodal model."""
+
+    image_url: str
+    detail: str = "auto"
+
+
+@dataclass
 class AIProviderStatus:
-    """Provider 健康状态。"""
+    """Provider health status."""
 
     configured: bool
     available: bool
@@ -32,25 +40,25 @@ class AIProviderStatus:
 
 
 class AIProvider(ABC):
-    """AI Provider 抽象接口。"""
+    """Base provider interface."""
 
     provider_name: str = "base"
 
     @abstractmethod
     def is_available(self) -> bool:
-        """当前 Provider 是否具备调用配置。"""
+        """Whether the provider is configured and callable."""
 
     @abstractmethod
     def get_model_name(self) -> str:
-        """返回当前模型名。"""
+        """Return the active model name."""
 
     @abstractmethod
     def get_base_url(self) -> str:
-        """返回当前服务地址。"""
+        """Return the active service base URL."""
 
     @abstractmethod
     def health_check(self) -> AIProviderStatus:
-        """检查 Provider 健康状态。"""
+        """Run a provider health check."""
 
     @abstractmethod
     def generate_text(
@@ -62,4 +70,27 @@ class AIProvider(ABC):
         max_tokens: int,
         response_format: str | None = None,
     ) -> AITextResult:
-        """生成文本。"""
+        """Generate text."""
+
+    def supports_vision(self) -> bool:
+        """Whether the provider can accept image inputs."""
+
+        return False
+
+    def generate_multimodal(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        images: list[AIImageInput],
+        temperature: float,
+        max_tokens: int,
+        response_format: str | None = None,
+    ) -> AITextResult:
+        """Generate text from text plus image evidence."""
+
+        return AITextResult(
+            success=False,
+            error="vision input unsupported",
+            provider=self.provider_name,
+        )

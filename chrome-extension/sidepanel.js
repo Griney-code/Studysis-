@@ -1,7 +1,7 @@
 const TEXT = {
   waitingConnection: "等待连接",
   noVideoPage: "尚未检测到视频页面",
-  openVideoTip: "请打开带有 HTML5 视频的网课页面",
+  openVideoTip: "请打开带有 HTML5 视频的网页页面",
   noSegment: "暂无分片数据",
   subtitlePlaceholder: "采集到的字幕会显示在这里",
   summaryPlaceholder: "暂无速览总结",
@@ -18,9 +18,15 @@ const TEXT = {
   loadingOverview: "正在生成内容摘要",
   loadingHint: "先整理页面线索和字幕，再给出首轮导览",
   loadingChapters: "正在整理章节内容",
-  loadingChaptersHint: "章节卡片整理完成后会自动展示在这里",
+  loadingChaptersHint: "章节卡片整理完成后会自动显示在这里",
   loadingExamPoints: "正在整理备考考点",
-  loadingExamPointsHint: "章节完成后会同步提炼重点内容"
+  loadingExamPointsHint: "章节完成后会同步提炼重点内容",
+  visualEvidenceTitle: "板书识别",
+  visualBoardLabel: "板书识别",
+  visualFormulaLabel: "公式提取",
+  visualDiagramLabel: "图示元素",
+  visualUncertainLabel: "识别备注",
+  visualImageLabel: "关键帧证据"
 };
 
 const STATUS_LABELS = {
@@ -30,6 +36,15 @@ const STATUS_LABELS = {
   paused: "已暂停",
   warning: "采样中",
   error: "连接异常"
+};
+
+const VISUAL_MARKERS = {
+  visualSummary: ["关键帧补充："],
+  boardNotes: ["板书识别：", "板书要点："],
+  formulaPoints: ["公式提取：", "公式/图示："],
+  diagramElements: ["图示元素："],
+  uncertainParts: ["识别备注："],
+  imageUrls: ["关键帧图片："]
 };
 
 const elements = {
@@ -107,7 +122,7 @@ function renderSession(session) {
     elements.segmentSubtitle.textContent = TEXT.subtitlePlaceholder;
     renderQuickSummary(null);
     renderStructuredNotes(elements.notesList, [], TEXT.noStructuredNotes, null);
-    renderList(elements.examList, [], TEXT.noExamPoints, null, null);
+    renderList(elements.examList, [], TEXT.noExamPoints, false, null);
     elements.notesCount.textContent = `0 ${TEXT.itemsSuffix}`;
     elements.examCount.textContent = `0 ${TEXT.itemsSuffix}`;
     return;
@@ -174,10 +189,7 @@ function renderQuickSummary(session) {
 }
 
 function isSummaryLoading(session, overviewSummary) {
-  if (session?.error) {
-    return false;
-  }
-  if (overviewSummary) {
+  if (session?.error || overviewSummary) {
     return false;
   }
   return ["ready", "running", "warning"].includes(session.status);
@@ -260,16 +272,17 @@ function renderStructuredNotes(container, items, emptyText, session) {
     const body = document.createElement("div");
     body.className = "chapter-body";
 
+    const detailSections = splitDetailSections(item.detail || chapterParts.detail || "");
+    const visualData = mergeVisualEvidence(detailSections.visual, item.imageUrls ?? []);
     const detail = document.createElement("p");
     detail.className = "note-content detail-content";
-    detail.textContent =
-      item.detail ||
-      chapterParts.detail ||
-      "这里会展示该章节的详细讲解，后续还会补充板书识别、公式识别和关键帧分析。";
+    detail.textContent = detailSections.body || "这里会展示该章节的详细讲解。";
+    body.appendChild(detail);
 
-    const future = document.createElement("div");
-    future.className = "future-hint";
-    future.textContent = "多模态增强预留：板书识别 / 公式识别 / 关键帧分析";
+    const visualEvidence = createVisualEvidenceBlock(visualData);
+    if (visualEvidence) {
+      body.appendChild(visualEvidence);
+    }
 
     const jumpButton = document.createElement("button");
     jumpButton.className = "jump-button";
@@ -280,8 +293,6 @@ function renderStructuredNotes(container, items, emptyText, session) {
       void jumpToVideo(item.seconds ?? 0);
     });
 
-    body.appendChild(detail);
-    body.appendChild(future);
     body.appendChild(jumpButton);
 
     card.appendChild(summary);
@@ -309,6 +320,238 @@ function splitChapterContent(content) {
     preview: lines[0],
     detail: lines.slice(1).join("\n")
   };
+}
+
+function splitDetailSections(detailText) {
+  const text = String(detailText || "").trim();
+  if (!text) {
+    return { body: "", visual: null };
+  }
+
+  const lines = text.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const bodyLines = [];
+  const visual = {
+    visualSummary: "",
+    detailAppendix: [],
+    boardNotes: [],
+    formulaPoints: [],
+    diagramElements: [],
+    uncertainParts: [],
+    imageUrls: []
+  };
+  let currentSection = "body";
+
+  lines.forEach((line) => {
+    const matchedMarker = Object.entries(VISUAL_MARKERS).find(([, markers]) =>
+      markers.some((marker) => line.startsWith(marker))
+    );
+    if (matchedMarker) {
+      const [sectionKey, markers] = matchedMarker;
+      const markerText = markers.find((marker) => line.startsWith(marker)) || "";
+      currentSection = sectionKey;
+      const value = line.slice(markerText.length).trim();
+      if (sectionKey === "visualSummary") {
+        visual.visualSummary = value;
+      } else if (sectionKey === "imageUrls") {
+        visual.imageUrls.push(...splitDelimitedItems(value));
+      } else if (value) {
+        visual[sectionKey].push(...splitDelimitedItems(value));
+      }
+      return;
+    }
+
+    if (currentSection === "visualSummary") {
+      visual.detailAppendix.push(line);
+      return;
+    }
+
+    if (
+      currentSection === "boardNotes"
+      || currentSection === "formulaPoints"
+      || currentSection === "diagramElements"
+      || currentSection === "uncertainParts"
+    ) {
+      visual[currentSection].push(...splitDelimitedItems(line));
+      return;
+    }
+
+    if (currentSection === "imageUrls") {
+      visual.imageUrls.push(...splitDelimitedItems(line));
+      return;
+    }
+
+    bodyLines.push(line);
+  });
+
+  const hasVisualEvidence = Boolean(
+    visual.visualSummary ||
+    visual.detailAppendix.length ||
+    visual.boardNotes.length ||
+    visual.formulaPoints.length ||
+    visual.diagramElements.length ||
+    visual.uncertainParts.length ||
+    visual.imageUrls.length
+  );
+
+  return {
+    body: bodyLines.join("\n"),
+    visual: hasVisualEvidence ? visual : null
+  };
+}
+
+function mergeVisualEvidence(visual, imageUrls) {
+  const normalizedImageUrls = normalizeImageUrls(imageUrls);
+
+  if (!visual && !normalizedImageUrls.length) {
+    return null;
+  }
+
+  if (!visual) {
+    return {
+      visualSummary: "",
+      detailAppendix: [],
+      boardNotes: [],
+      formulaPoints: [],
+      diagramElements: [],
+      uncertainParts: [],
+      imageUrls: normalizedImageUrls
+    };
+  }
+
+  return {
+    ...visual,
+    imageUrls: dedupeItems([...(visual.imageUrls ?? []), ...normalizedImageUrls])
+  };
+}
+
+function normalizeImageUrls(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  return dedupeItems(
+    items
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+  );
+}
+
+function splitDelimitedItems(text) {
+  return String(text || "")
+    .split("；")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function createVisualEvidenceBlock(visual) {
+  if (!visual) {
+    return null;
+  }
+
+  const wrapper = document.createElement("section");
+  wrapper.className = "visual-evidence";
+
+  const title = document.createElement("div");
+  title.className = "visual-evidence-title";
+  title.textContent = TEXT.visualEvidenceTitle;
+  wrapper.appendChild(title);
+
+  if (visual.visualSummary) {
+    const summary = document.createElement("p");
+    summary.className = "visual-evidence-summary";
+    summary.textContent = visual.visualSummary;
+    wrapper.appendChild(summary);
+  }
+
+  if (visual.detailAppendix.length) {
+    const appendix = document.createElement("p");
+    appendix.className = "visual-evidence-detail";
+    appendix.textContent = visual.detailAppendix.join("\n");
+    wrapper.appendChild(appendix);
+  }
+
+  if (visual.boardNotes.length) {
+    wrapper.appendChild(createVisualEvidenceList(TEXT.visualBoardLabel, visual.boardNotes));
+  }
+
+  if (visual.formulaPoints.length) {
+    wrapper.appendChild(createVisualEvidenceList(TEXT.visualFormulaLabel, visual.formulaPoints));
+  }
+
+  if (visual.diagramElements.length) {
+    wrapper.appendChild(createVisualEvidenceList(TEXT.visualDiagramLabel, visual.diagramElements));
+  }
+
+  if (visual.uncertainParts.length) {
+    wrapper.appendChild(createVisualEvidenceList(TEXT.visualUncertainLabel, visual.uncertainParts));
+  }
+
+  if (visual.imageUrls.length) {
+    wrapper.appendChild(createVisualEvidenceImages(TEXT.visualImageLabel, visual.imageUrls));
+  }
+
+  return wrapper;
+}
+
+function createVisualEvidenceList(label, items) {
+  const section = document.createElement("div");
+  section.className = "visual-evidence-group";
+
+  const heading = document.createElement("div");
+  heading.className = "visual-evidence-label";
+  heading.textContent = label;
+  section.appendChild(heading);
+
+  const list = document.createElement("ul");
+  list.className = "visual-evidence-list";
+
+  items.forEach((item) => {
+    const listItem = document.createElement("li");
+    listItem.textContent = item;
+    list.appendChild(listItem);
+  });
+
+  section.appendChild(list);
+  return section;
+}
+
+function createVisualEvidenceImages(label, imageUrls) {
+  const section = document.createElement("details");
+  section.className = "visual-evidence-group visual-evidence-images";
+
+  const heading = document.createElement("summary");
+  heading.className = "visual-evidence-label";
+  heading.textContent = label;
+  section.appendChild(heading);
+
+  const gallery = document.createElement("div");
+  gallery.className = "visual-evidence-gallery";
+
+  imageUrls.forEach((url, index) => {
+    if (!url) {
+      return;
+    }
+    const image = document.createElement("img");
+    image.className = "visual-evidence-image";
+    image.src = url;
+    image.alt = `关键帧 ${index + 1}`;
+    image.loading = "lazy";
+    gallery.appendChild(image);
+  });
+
+  section.appendChild(gallery);
+  return section;
+}
+
+function splitVisualItems(text) {
+  return String(text || "")
+    .split("；")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function dedupeItems(items) {
+  return Array.from(new Set((items || []).filter(Boolean)));
 }
 
 function renderList(container, items, emptyText, isLoading = false, loadingCopy = null) {
@@ -400,7 +643,7 @@ function isExamPointsLoading(session, items) {
 }
 
 function getNoteId(item, index) {
-  return item.id || `${item.title || "note"}-${item.timestamp || "00:00"}-${index}`;
+  return item.id || item.noteId || `${item.title || "note"}-${item.timestamp || "00:00"}-${index}`;
 }
 
 async function jumpToVideo(seconds) {

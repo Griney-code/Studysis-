@@ -8,6 +8,7 @@ class NoteItem(BaseModel):
     title: str = Field(default="", description="Title")
     content: str = Field(default="", description="Summary content")
     detail: str = Field(default="", description="Expanded detail")
+    image_urls: list[str] = Field(default_factory=list, description="Attached keyframe image URLs")
     category: str = Field(default="章节导览", description="Category")
     timestamp: str = Field(default="00:00", description="Display timestamp")
     seconds: float = Field(default=0, description="Seek position in seconds")

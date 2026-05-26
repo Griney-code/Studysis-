@@ -6,68 +6,103 @@ from typing import Any
 
 def build_global_outline_system_prompt() -> str:
     return (
-        "你是一个教学视频内容规划助手。"
-        "你会先通读整段字幕，再给出全局导览和章节划分。"
-        "请严格输出 JSON，不要输出 markdown，不要解释，不要补充多余文字。"
-        "标题要自然、像人写的讲义标题，不能口号化，不能重复。"
+        "You are a teaching-video outline assistant. "
+        "Read the full transcript blocks, then produce a clean global overview and chapter plan. "
+        "Return strict JSON only, with no markdown fences and no extra explanation."
     )
 
 
 def build_global_outline_user_prompt(payload: dict[str, Any]) -> str:
     schema = {
-        "overview_summary": "1到3句，概括整节视频的核心主线",
+        "overview_summary": "One or two sentences that summarize the whole lesson.",
         "chapters": [
             {
                 "index": 1,
-                "title": "章节标题",
+                "title": "Chapter title",
                 "start_seconds": 0,
                 "end_seconds": 120,
-                "focus": "概念定义/公式方法/例题讲解/总结归纳",
-                "summary": "一句话概括这一章讲什么",
+                "focus": "Concepts / Methods / Worked Examples / Review / Orientation",
+                "summary": "One sentence describing the chapter focus.",
             }
         ],
-        "exam_points": ["整节视频层面的3到8条备考考点"],
+        "exam_points": ["Reviewable points for revision or question design"],
     }
 
     return (
-        "请根据下面的整段字幕转录，为教学视频规划章节结构。\n"
-        "要求：\n"
-        "1. 章节必须按时间顺序排列。\n"
-        "2. start_seconds 和 end_seconds 要落在给定字幕时间范围内。\n"
-        "3. 不要切得过碎，通常控制在 3 到 8 章。\n"
-        "4. 标题要能体现内容递进，不要重复。\n"
-        "5. summary 只写一句，简洁清楚。\n"
-        "6. exam_points 要能用于复习和出题，不要写空话。\n\n"
-        f"输出 JSON 结构：\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
-        f"输入数据：\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+        "Plan a teaching-video chapter structure from the transcript.\n"
+        "Requirements:\n"
+        "1. Chapters must follow the transcript timeline.\n"
+        "2. Keep chapter boundaries within the provided time range.\n"
+        "3. Usually keep the lesson within 3 to 8 chapters.\n"
+        "4. Titles should sound like human-written study notes, not slogans.\n"
+        "5. Exam points should be specific and reviewable.\n\n"
+        f"Output JSON schema:\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
+        f"Input payload:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
 
 
 def build_chapter_analysis_system_prompt() -> str:
     return (
-        "你是一个教学视频章节分析助手。"
-        "你会针对某一个已经确定边界的章节，生成简洁摘要、详细讲解和备考考点。"
-        "请严格输出 JSON，不要输出 markdown，不要解释。"
-        "语言要自然、具体、去 AI 味，避免空话套话。"
+        "You are a teaching-video chapter analysis assistant. "
+        "Given one chapter with a transcript slice, produce a concise summary, a useful explanation, and revision points. "
+        "Return strict JSON only, with no markdown fences and no extra explanation."
     )
 
 
 def build_chapter_analysis_user_prompt(payload: dict[str, Any]) -> str:
     schema = {
-        "title": "润色后的章节标题",
-        "summary": "1到2句，适合章卡片展示",
-        "detail": "3到6句，对本章进行具体讲解",
-        "exam_points": ["2到5条本章备考考点"],
+        "title": "Polished chapter title",
+        "summary": "One short sentence for the chapter card.",
+        "detail": "Two to four sentences explaining the chapter clearly.",
+        "exam_points": ["Two to five reviewable chapter points"],
     }
 
     return (
-        "请根据下面的章节字幕内容，生成这个章节的学习笔记。\n"
+        "Write study notes for this teaching-video chapter.\n"
+        "Requirements:\n"
+        "1. Keep the title natural and specific.\n"
+        "2. The summary should be short and card-friendly.\n"
+        "3. The detail should clarify concepts, methods, formulas, and example logic when present.\n"
+        "4. Exam points must be reviewable and question-oriented.\n"
+        "5. Do not simply copy the raw transcript.\n\n"
+        f"Output JSON schema:\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
+        f"Input payload:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
+
+
+def build_visual_chapter_analysis_system_prompt() -> str:
+    return (
+        "You are a teaching-video OCR and board-recognition assistant. "
+        "Use the provided chapter transcript and keyframes together. "
+        "Treat the keyframes as a time-ordered sequence of board states instead of isolated screenshots. "
+        "Extract visible board writing, formulas, diagram labels, and slide structure conservatively. "
+        "Prefer later frames when they contain a more complete board state, and merge repeated content across frames. "
+        "Do not invent text that is not visibly present. "
+        "Always respond in Simplified Chinese. "
+        "Return strict JSON only, with no markdown fences and no extra explanation."
+    )
+
+
+def build_visual_chapter_analysis_user_prompt(payload: dict[str, Any]) -> str:
+    schema = {
+        "visual_summary": "一句话概括这组关键帧为本章补充了什么板书或图示信息",
+        "detail_appendix": "2到4句，解释这些关键帧怎样帮助理解本章，重点补充字幕里没有说清的视觉信息",
+        "board_lines": ["按板书原意提取的短句、定义、结论或标题"],
+        "formula_lines": ["图中清晰可见的公式、符号关系或 LaTeX 风格表达"],
+        "diagram_elements": ["图示中的标签、坐标轴、箭头、变量、结构名称等"],
+        "uncertain_parts": ["看不清、只看到一部分、无法确认的内容，明确标注不确定"],
+        "exam_points": ["由板书、公式或图示支持的复习考点"],
+    }
+
+    return (
+        "请对这一章关联的多张关键帧做板书识别和视觉补充。\n"
         "要求：\n"
-        "1. 保持标题自然，不要重复整节视频标题。\n"
-        "2. summary 要短，适合卡片概览。\n"
-        "3. detail 要把定义、公式、方法、例题逻辑讲清楚。\n"
-        "4. exam_points 要是能复习、能命题的知识点。\n"
-        "5. 不要直接大段复述原字幕。\n\n"
+        "1. 全部使用简体中文输出。\n"
+        "2. 重点做 OCR 风格提取：板书行、公式、图示标签、结构名称。\n"
+        "3. 多张关键帧要按时间顺序综合，重复内容去重，后面更完整的板书优先。\n"
+        "4. 只写图里明确看得出的内容；看不清的部分放进 uncertain_parts，不要脑补。\n"
+        "5. 不要机械复述字幕，重点补充字幕里没有、但板书里能看到的信息。\n"
+        "6. board_lines 更像板书摘录；detail_appendix 更像学习解释；两者不要混写。\n\n"
         f"输出 JSON 结构：\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
         f"输入数据：\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )

@@ -64,7 +64,19 @@ async function syncSession(payload, sender) {
 
   const storageKey = getStorageKey(tabId);
   const previous = (await chrome.storage.local.get(storageKey))[storageKey] ?? {};
-  const mergedNotes = mergeNotes(previous.notes, payload.notes);
+  const isNewSession = Boolean(
+    payload?.sessionId
+    && previous.sessionId
+    && payload.sessionId !== previous.sessionId
+  );
+
+  const previousVersion = getSessionVersion(previous);
+  const incomingVersion = getPayloadVersion(payload, previousVersion);
+  if (!isNewSession && incomingVersion < previousVersion) {
+    return { ok: true, session: previous, ignored: true };
+  }
+
+  const mergedNotes = mergeNotes(isNewSession ? {} : previous.notes, payload.notes);
 
   const session = {
     tabId,
@@ -78,6 +90,9 @@ async function syncSession(payload, sender) {
     error: payload.error ?? "",
     lastSegment: payload.lastSegment ?? previous.lastSegment ?? null,
     notes: mergedNotes,
+    analysisRequestVersion: payload.analysisRequestVersion ?? previous.analysisRequestVersion ?? 0,
+    sessionUpdatedAt: payload.sessionUpdatedAt ?? previous.sessionUpdatedAt ?? "",
+    stateVersion: incomingVersion,
     lastUpdated: new Date().toISOString()
   };
 
@@ -89,7 +104,7 @@ async function syncSession(payload, sender) {
       payload: session
     });
   } catch (_error) {
-    // 侧边栏未打开时无需中断采集流程。
+    // Sidepanel may be closed; this should not interrupt collection.
   }
 
   return { ok: true, session };
@@ -150,27 +165,89 @@ async function fetchSubtitleBody(message) {
   }
 }
 
-function mergeNotes(previousNotes = {}, incomingNotes = {}) {
-  const structuredNotes = Array.isArray(incomingNotes.structuredNotes) && incomingNotes.structuredNotes.length
-    ? incomingNotes.structuredNotes
+function mergeNotes(previousNotes = {}, incomingNotes = undefined) {
+  if (!incomingNotes || typeof incomingNotes !== "object") {
+    return previousNotes || {};
+  }
+
+  const structuredNotes = Array.isArray(incomingNotes.structuredNotes)
+    ? mergeNoteArrays(previousNotes.structuredNotes || [], incomingNotes.structuredNotes)
     : previousNotes.structuredNotes || [];
-  const detailedNotes = Array.isArray(incomingNotes.detailedNotes) && incomingNotes.detailedNotes.length
-    ? incomingNotes.detailedNotes
+  const detailedNotes = Array.isArray(incomingNotes.detailedNotes)
+    ? mergeNoteArrays(previousNotes.detailedNotes || [], incomingNotes.detailedNotes)
     : previousNotes.detailedNotes || [];
-  const examPoints = Array.isArray(incomingNotes.examPoints) && incomingNotes.examPoints.length
-    ? incomingNotes.examPoints
+  const examPoints = Array.isArray(incomingNotes.examPoints)
+    ? mergeNoteArrays(previousNotes.examPoints || [], incomingNotes.examPoints)
     : previousNotes.examPoints || [];
 
   return {
-    quickSummary: incomingNotes.quickSummary || incomingNotes.overviewSummary || previousNotes.quickSummary || "",
-    overviewSummary: incomingNotes.overviewSummary || incomingNotes.quickSummary || previousNotes.overviewSummary || "",
-    liveSummary: incomingNotes.liveSummary || previousNotes.liveSummary || "",
+    quickSummary:
+      incomingNotes.quickSummary
+      ?? incomingNotes.overviewSummary
+      ?? previousNotes.quickSummary
+      ?? "",
+    overviewSummary:
+      incomingNotes.overviewSummary
+      ?? incomingNotes.quickSummary
+      ?? previousNotes.overviewSummary
+      ?? "",
+    liveSummary: incomingNotes.liveSummary ?? previousNotes.liveSummary ?? "",
     structuredNotes,
     detailedNotes,
     examPoints,
-    markdown: incomingNotes.markdown || previousNotes.markdown || "",
-    backendMessage: incomingNotes.backendMessage || previousNotes.backendMessage || ""
+    markdown: incomingNotes.markdown ?? previousNotes.markdown ?? "",
+    backendMessage: incomingNotes.backendMessage ?? previousNotes.backendMessage ?? ""
   };
+}
+
+function mergeNoteArrays(previousItems = [], incomingItems = []) {
+  if (!incomingItems.length) {
+    return [];
+  }
+
+  const previousById = new Map(
+    previousItems
+      .filter((item) => item && typeof item === "object")
+      .map((item, index) => [getNoteIdentity(item, index), item])
+  );
+
+  return incomingItems.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      return item;
+    }
+
+    const noteId = getNoteIdentity(item, index);
+    const previousItem = previousById.get(noteId) || {};
+    return {
+      ...previousItem,
+      ...item
+    };
+  });
+}
+
+function getNoteIdentity(item, index) {
+  if (typeof item?.id === "string" && item.id.trim()) {
+    return item.id.trim();
+  }
+  if (typeof item?.noteId === "string" && item.noteId.trim()) {
+    return item.noteId.trim();
+  }
+  return `${item?.title ?? "note"}-${item?.timestamp ?? "00:00"}-${index}`;
+}
+
+function getSessionVersion(session = {}) {
+  const updatedAt = Date.parse(session.sessionUpdatedAt ?? "") || 0;
+  const requestVersion = Number(session.analysisRequestVersion ?? 0) || 0;
+  return updatedAt * 1000 + requestVersion;
+}
+
+function getPayloadVersion(payload = {}, fallbackVersion = 0) {
+  const updatedAt = Date.parse(payload.sessionUpdatedAt ?? "") || 0;
+  const requestVersion = Number(payload.analysisRequestVersion ?? 0) || 0;
+  if (!updatedAt && !requestVersion) {
+    return fallbackVersion;
+  }
+  return updatedAt * 1000 + requestVersion;
 }
 
 function preferNonEmptyString(value, fallback) {

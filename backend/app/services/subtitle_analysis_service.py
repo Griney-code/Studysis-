@@ -1,21 +1,26 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import ceil
+from pathlib import Path
 from typing import Any, Callable
 
 from app.core.config import settings
 from app.schemas.note import NoteItem, NotesPayload
-from app.services.ai.factory import get_ai_provider
+from app.services.ai.base import AIImageInput
+from app.services.ai.factory import get_text_ai_provider, get_vision_ai_provider
 from app.services.ai.prompts import (
     build_chapter_analysis_system_prompt,
     build_chapter_analysis_user_prompt,
     build_global_outline_system_prompt,
     build_global_outline_user_prompt,
+    build_visual_chapter_analysis_system_prompt,
+    build_visual_chapter_analysis_user_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +62,12 @@ class ChapterAnalysis:
     detail: str
     exam_points: list[str]
     transcript: str
+    visual_summary: str = ""
+    board_notes: list[str] = field(default_factory=list)
+    formula_points: list[str] = field(default_factory=list)
+    diagram_elements: list[str] = field(default_factory=list)
+    uncertain_parts: list[str] = field(default_factory=list)
+    image_urls: list[str] = field(default_factory=list)
 
 
 class SubtitleAnalysisService:
@@ -172,6 +183,7 @@ class SubtitleAnalysisService:
         session_id: str,
         session: dict[str, Any],
         subtitle_payload: dict[str, Any],
+        keyframe_payload: dict[str, Any] | None = None,
         progress_callback: Callable[[NotesPayload, dict[str, Any], dict[str, Any]], None] | None = None,
     ) -> tuple[NotesPayload, dict[str, Any], dict[str, Any]] | None:
         tracks = subtitle_payload.get("tracks") or []
@@ -196,6 +208,27 @@ class SubtitleAnalysisService:
             cleaned_cues=cleaned_cues,
             transcript_blocks=transcript_blocks,
             full_transcript=full_transcript,
+        )
+        debug_payload["keyframes"] = {
+            "updated_at": (keyframe_payload or {}).get("updated_at", ""),
+            "count": len((keyframe_payload or {}).get("items") or []),
+            "items": [
+                {
+                    "captured_at_seconds": item.get("captured_at_seconds", 0),
+                    "time_label": item.get("time_label", ""),
+                    "capture_reason": item.get("capture_reason", ""),
+                    "image_path": item.get("image_path", ""),
+                }
+                for item in ((keyframe_payload or {}).get("items") or [])[:8]
+            ],
+        }
+        previous_analysis = session.get("analysis", {})
+        previous_notes = NotesPayload.model_validate(session.get("notes", {}))
+        should_refresh_text_chapters = self._should_refresh_text_chapters(
+            session=session,
+            subtitle_payload=subtitle_payload,
+            previous_analysis=previous_analysis,
+            previous_notes=previous_notes,
         )
 
         outline, outline_meta = self._plan_global_outline(
@@ -236,11 +269,35 @@ class SubtitleAnalysisService:
                 debug_payload,
             )
 
-        chapter_analyses, chapter_meta = self._analyze_chapters(
+        if settings.ai_enable_text_chapter_analysis and should_refresh_text_chapters:
+            chapter_analyses, chapter_meta = self._analyze_chapters(
+                session=session,
+                cleaned_cues=cleaned_cues,
+                outline=outline,
+                overview_summary=outline_meta.get("overview_summary", ""),
+                debug_payload=debug_payload,
+            )
+        else:
+            chapter_analyses = self._build_base_chapter_analyses(
+                session=session,
+                cleaned_cues=cleaned_cues,
+                outline=outline,
+                previous_notes=previous_notes,
+            )
+            debug_payload["chapter_analysis_runs"] = []
+            chapter_meta = {
+                "mode": "existing_chapter_analysis" if self._notes_have_structured_content(previous_notes) else "rule_chapter_analysis",
+                "provider": "",
+                "model": "",
+                "ai_used": False,
+                "ai_error": "",
+            }
+        chapter_analyses, vision_meta = self._enhance_chapters_with_keyframes(
             session=session,
-            cleaned_cues=cleaned_cues,
             outline=outline,
+            chapter_analyses=chapter_analyses,
             overview_summary=outline_meta.get("overview_summary", ""),
+            keyframe_payload=keyframe_payload or {},
             debug_payload=debug_payload,
         )
         notes = self._build_notes(
@@ -249,26 +306,113 @@ class SubtitleAnalysisService:
             planned_chapters=outline,
             chapter_analyses=chapter_analyses,
             global_exam_points=outline_meta.get("exam_points", []),
-            ai_used=outline_meta.get("ai_used", False) or chapter_meta.get("ai_used", False),
-            provider_name=outline_meta.get("provider", "") or chapter_meta.get("provider", ""),
+            ai_used=(
+                outline_meta.get("ai_used", False)
+                or chapter_meta.get("ai_used", False)
+                or vision_meta.get("ai_used", False)
+            ),
+            provider_name=self._build_provider_summary(
+                text_provider_name=outline_meta.get("provider", "") or chapter_meta.get("provider", ""),
+                vision_provider_name=vision_meta.get("provider", ""),
+            ),
         )
 
         analysis_meta = {
             "session_id": session_id,
-            "mode": chapter_meta.get("mode") or outline_meta.get("mode") or "rule",
+            "mode": vision_meta.get("mode") or chapter_meta.get("mode") or outline_meta.get("mode") or "rule",
             "provider": outline_meta.get("provider", ""),
             "model": outline_meta.get("model", ""),
-            "ai_used": bool(outline_meta.get("ai_used") or chapter_meta.get("ai_used")),
-            "ai_error": chapter_meta.get("ai_error") or outline_meta.get("ai_error", ""),
+            "vision_provider": vision_meta.get("provider", ""),
+            "vision_model": vision_meta.get("model", ""),
+            "ai_used": bool(
+                outline_meta.get("ai_used")
+                or chapter_meta.get("ai_used")
+                or vision_meta.get("ai_used")
+            ),
+            "ai_error": self._join_error_messages(
+                outline_meta.get("ai_error", ""),
+                chapter_meta.get("ai_error", ""),
+                vision_meta.get("ai_error", ""),
+            ),
             "track_count": len(tracks),
             "cleaned_cue_count": len(cleaned_cues),
             "transcript_block_count": len(transcript_blocks),
             "chapter_count": len(outline),
+            "visual_chapter_count": vision_meta.get("visual_chapter_count", 0),
             "subtitle_updated_at": subtitle_payload.get("updated_at", ""),
+            "keyframe_updated_at": (keyframe_payload or {}).get("updated_at", ""),
             "overview_summary": outline_meta.get("overview_summary", ""),
             "phase": "completed",
         }
         return notes, analysis_meta, debug_payload
+
+    def _should_refresh_text_chapters(
+        self,
+        *,
+        session: dict[str, Any],
+        subtitle_payload: dict[str, Any],
+        previous_analysis: dict[str, Any],
+        previous_notes: NotesPayload,
+    ) -> bool:
+        if not settings.ai_enable_text_chapter_analysis:
+            return False
+        if not self._notes_have_structured_content(previous_notes):
+            return True
+        current_subtitle_updated_at = self._normalize_text(subtitle_payload.get("updated_at", ""))
+        previous_subtitle_updated_at = self._normalize_text(previous_analysis.get("subtitle_updated_at", ""))
+        if current_subtitle_updated_at != previous_subtitle_updated_at:
+            return True
+        if not previous_notes.overview_summary or not previous_notes.exam_points:
+            return True
+        return False
+
+    def _notes_have_structured_content(self, notes: NotesPayload) -> bool:
+        return bool(notes.structured_notes and notes.detailed_notes)
+
+    def _build_base_chapter_analyses(
+        self,
+        *,
+        session: dict[str, Any],
+        cleaned_cues: list[SubtitleCue],
+        outline: list[PlannedChapter],
+        previous_notes: NotesPayload,
+    ) -> list[ChapterAnalysis]:
+        previous_by_id = {
+            item.note_id: item
+            for item in previous_notes.structured_notes
+            if item.note_id
+        }
+        analyses: list[ChapterAnalysis] = []
+        fallback_map = {
+            item.index: item
+            for item in self._build_fallback_chapter_analyses(
+                cleaned_cues=cleaned_cues,
+                outline=outline,
+            )
+        }
+
+        for chapter in outline:
+            previous_note = previous_by_id.get(f"chapter-{chapter.index}")
+            fallback = fallback_map.get(chapter.index) or self._build_fallback_chapter_analysis(chapter, "")
+            if previous_note is None:
+                analyses.append(fallback)
+                continue
+
+            analyses.append(
+                ChapterAnalysis(
+                    index=chapter.index,
+                    title=previous_note.title or fallback.title,
+                    start=chapter.start,
+                    end=chapter.end,
+                    focus=chapter.focus,
+                    summary=previous_note.content or fallback.summary,
+                    detail=previous_note.detail or fallback.detail,
+                    exam_points=fallback.exam_points,
+                    transcript=fallback.transcript,
+                    image_urls=list(previous_note.image_urls or []),
+                )
+            )
+        return analyses
 
     def _build_outline_only_notes(
         self,
@@ -443,7 +587,7 @@ class SubtitleAnalysisService:
         subtitle_payload: dict[str, Any],
         debug_payload: dict[str, Any],
     ) -> tuple[list[PlannedChapter], dict[str, Any]]:
-        provider = get_ai_provider()
+        provider = get_text_ai_provider()
         provider_name = getattr(provider, "provider_name", "none")
         model_name = provider.get_model_name() if hasattr(provider, "get_model_name") else ""
 
@@ -556,7 +700,7 @@ class SubtitleAnalysisService:
         overview_summary: str,
         debug_payload: dict[str, Any],
     ) -> tuple[list[ChapterAnalysis], dict[str, Any]]:
-        provider = get_ai_provider()
+        provider = get_text_ai_provider()
         provider_name = getattr(provider, "provider_name", "none")
         model_name = provider.get_model_name() if hasattr(provider, "get_model_name") else ""
 
@@ -628,7 +772,7 @@ class SubtitleAnalysisService:
         chapter: PlannedChapter,
         overview_summary: str,
     ) -> tuple[ChapterAnalysis | None, dict[str, Any], bool]:
-        provider = get_ai_provider()
+        provider = get_text_ai_provider()
         chapter_cues = self._slice_cues(cleaned_cues, chapter.start, chapter.end)
         chapter_text = self._join_transcript_parts([cue.text for cue in chapter_cues])
         prompt_payload = {
@@ -690,6 +834,205 @@ class SubtitleAnalysisService:
             False,
         )
 
+    def _enhance_chapters_with_keyframes(
+        self,
+        *,
+        session: dict[str, Any],
+        outline: list[PlannedChapter],
+        chapter_analyses: list[ChapterAnalysis],
+        overview_summary: str,
+        keyframe_payload: dict[str, Any],
+        debug_payload: dict[str, Any],
+    ) -> tuple[list[ChapterAnalysis], dict[str, Any]]:
+        provider = get_vision_ai_provider()
+        provider_name = getattr(provider, "provider_name", "none")
+        model_name = provider.get_model_name() if hasattr(provider, "get_model_name") else ""
+        manifest_items = keyframe_payload.get("items") or []
+        debug_payload["chapter_visual_runs"] = []
+
+        if not manifest_items:
+            return chapter_analyses, {
+                "mode": "",
+                "provider": provider_name,
+                "model": model_name,
+                "ai_used": False,
+                "ai_error": "",
+                "visual_chapter_count": 0,
+            }
+
+        if not provider.is_available() or not provider.supports_vision():
+            return chapter_analyses, {
+                "mode": "vision_unavailable",
+                "provider": provider_name,
+                "model": model_name,
+                "ai_used": False,
+                "ai_error": "vision provider unavailable",
+                "visual_chapter_count": 0,
+            }
+
+        analysis_map = {item.index: item for item in chapter_analyses}
+        visual_chapter_count = 0
+        had_failure = False
+        max_visual_chapters = max(0, int(settings.ai_vision_max_chapters))
+        used_keyframe_ids: set[str] = set()
+
+        for chapter in outline:
+            if max_visual_chapters and visual_chapter_count >= max_visual_chapters:
+                break
+            keyframes = self._pick_chapter_keyframes(
+                manifest_items=manifest_items,
+                start_seconds=chapter.start,
+                end_seconds=chapter.end,
+                limit=max(1, int(settings.ai_vision_images_per_chapter)),
+                excluded_ids=used_keyframe_ids,
+            )
+            if not keyframes:
+                continue
+
+            base_analysis = analysis_map.get(chapter.index) or self._build_fallback_chapter_analysis(chapter, "")
+            enhanced_analysis, run_debug, failed = self._run_visual_chapter_enhancement(
+                session=session,
+                chapter=chapter,
+                base_analysis=base_analysis,
+                overview_summary=overview_summary,
+                keyframes=keyframes,
+            )
+            debug_payload["chapter_visual_runs"].append(run_debug)
+            had_failure = had_failure or failed
+            if enhanced_analysis is None:
+                continue
+            analysis_map[chapter.index] = enhanced_analysis
+            visual_chapter_count += 1
+            used_keyframe_ids.update(self._build_keyframe_identity(item) for item in keyframes)
+
+        chapter_results = [analysis_map[item.index] for item in outline if item.index in analysis_map]
+        visual_mode = ""
+        if visual_chapter_count:
+            visual_mode = "ai_visual_enhancement" if not had_failure else "ai_visual_enhancement_partial"
+        elif had_failure:
+            visual_mode = "ai_visual_enhancement_failed"
+
+        return chapter_results, {
+            "mode": visual_mode,
+            "provider": provider_name,
+            "model": model_name,
+            "ai_used": bool(visual_chapter_count),
+            "ai_error": "partial visual enhancement fallback" if had_failure else "",
+            "visual_chapter_count": visual_chapter_count,
+        }
+
+    def _run_visual_chapter_enhancement(
+        self,
+        *,
+        session: dict[str, Any],
+        chapter: PlannedChapter,
+        base_analysis: ChapterAnalysis,
+        overview_summary: str,
+        keyframes: list[dict[str, Any]],
+    ) -> tuple[ChapterAnalysis | None, dict[str, Any], bool]:
+        provider = get_vision_ai_provider()
+        images = self._build_image_inputs(keyframes)
+        prompt_payload = {
+            "page_title": session.get("page_title", ""),
+            "overview_summary": overview_summary,
+            "chapter": {
+                "index": chapter.index,
+                "title": base_analysis.title or chapter.title,
+                "focus": chapter.focus,
+                "time_label": f"{self._format_time(chapter.start)}-{self._format_time(chapter.end)}",
+                "summary": base_analysis.summary or chapter.summary,
+                "detail": self._truncate_text(base_analysis.detail, 420),
+                "transcript": self._truncate_text(base_analysis.transcript, 700),
+            },
+            "keyframes": [
+                {
+                    "captured_at_seconds": item.get("captured_at_seconds", 0),
+                    "time_label": item.get("time_label", ""),
+                    "capture_reason": item.get("capture_reason", ""),
+                }
+                for item in keyframes
+            ],
+        }
+
+        run_debug = {
+            "chapter_index": chapter.index,
+            "input": prompt_payload,
+            "image_count": len(images),
+            "raw_output": "",
+            "parsed_output": {},
+            "error": "",
+        }
+        if not images:
+            run_debug["error"] = "no readable keyframe images"
+            return None, run_debug, True
+
+        result = provider.generate_multimodal(
+            system_prompt=build_visual_chapter_analysis_system_prompt(),
+            user_prompt=build_visual_chapter_analysis_user_prompt(prompt_payload),
+            images=images,
+            temperature=settings.ai_vision_temperature,
+            max_tokens=settings.ai_vision_max_tokens,
+            response_format="json",
+        )
+        run_debug["raw_output"] = result.text if result.success else ""
+        run_debug["error"] = result.error
+        if not result.success:
+            return None, run_debug, True
+
+        parsed = self._parse_json_payload(result.text)
+        run_debug["parsed_output"] = parsed or {}
+        if not parsed:
+            run_debug["error"] = "visual analysis parse failed"
+            return None, run_debug, True
+
+        visual_summary = self._normalize_text(parsed.get("visual_summary", ""))
+        detail_appendix = self._normalize_text(parsed.get("detail_appendix", ""))
+        board_notes = self._normalize_string_list(
+            parsed.get("board_lines") or parsed.get("board_notes"),
+            limit=8,
+        )
+        formula_points = self._normalize_string_list(
+            parsed.get("formula_lines") or parsed.get("formula_points"),
+            limit=6,
+        )
+        diagram_elements = self._normalize_string_list(parsed.get("diagram_elements"), limit=6)
+        uncertain_parts = self._normalize_string_list(parsed.get("uncertain_parts"), limit=4)
+        visual_exam_points = self._normalize_string_list(parsed.get("exam_points"), limit=4)
+
+        return (
+            ChapterAnalysis(
+                index=base_analysis.index,
+                title=base_analysis.title,
+                start=base_analysis.start,
+                end=base_analysis.end,
+                focus=base_analysis.focus,
+                summary=base_analysis.summary,
+                detail=self._merge_detail_with_visual(
+                    base_detail=base_analysis.detail,
+                    visual_summary=visual_summary,
+                    detail_appendix=detail_appendix,
+                    board_notes=board_notes,
+                    formula_points=formula_points,
+                    diagram_elements=diagram_elements,
+                    uncertain_parts=uncertain_parts,
+                    image_urls=self._build_public_keyframe_urls(keyframes),
+                ),
+                exam_points=self._dedupe_texts(
+                    [*base_analysis.exam_points, *visual_exam_points, *formula_points, *board_notes],
+                    limit=6,
+                ),
+                transcript=base_analysis.transcript,
+                visual_summary=visual_summary,
+                board_notes=board_notes,
+                formula_points=formula_points,
+                diagram_elements=diagram_elements,
+                uncertain_parts=uncertain_parts,
+                image_urls=self._build_public_keyframe_urls(keyframes),
+            ),
+            run_debug,
+            False,
+        )
+
     def _build_notes(
         self,
         *,
@@ -720,6 +1063,7 @@ class SubtitleAnalysisService:
                     title=title,
                     content=summary,
                     detail=analysis.detail,
+                    image_urls=analysis.image_urls,
                     category=chapter.focus,
                     timestamp=self._format_time(chapter.start),
                     seconds=chapter.start,
@@ -731,6 +1075,7 @@ class SubtitleAnalysisService:
                     title=title,
                     content=summary,
                     detail=analysis.detail,
+                    image_urls=analysis.image_urls,
                     category=chapter.focus,
                     timestamp=self._format_time(chapter.start),
                     seconds=chapter.start,
@@ -764,6 +1109,190 @@ class SubtitleAnalysisService:
             markdown=markdown,
             backend_message=backend_message,
         )
+
+    def _build_provider_summary(self, *, text_provider_name: str, vision_provider_name: str) -> str:
+        text_name = self._normalize_text(text_provider_name)
+        vision_name = self._normalize_text(vision_provider_name)
+        if text_name and vision_name:
+            return f"{text_name}+{vision_name}"
+        return text_name or vision_name
+
+    def _join_error_messages(self, *messages: str) -> str:
+        parts = [self._normalize_text(message) for message in messages if self._normalize_text(message)]
+        if not parts:
+            return ""
+        return " | ".join(self._dedupe_texts(parts, limit=len(parts)))
+
+    def _pick_chapter_keyframes(
+        self,
+        *,
+        manifest_items: list[dict[str, Any]],
+        start_seconds: float,
+        end_seconds: float,
+        limit: int,
+        excluded_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        chapter_span = max(1.0, end_seconds - start_seconds)
+        boundary_tolerance_seconds = 2.0
+        fallback_previous_gap = min(45.0, max(8.0, chapter_span * 0.2))
+        excluded_ids = excluded_ids or set()
+        inside_items = [
+            item
+            for item in manifest_items
+            if (start_seconds - boundary_tolerance_seconds)
+            <= float(item.get("captured_at_seconds", 0) or 0)
+            <= end_seconds
+            and self._build_keyframe_identity(item) not in excluded_ids
+        ]
+        selected = self._select_visual_keyframes(inside_items, limit=limit)
+        if selected:
+            return selected
+
+        previous_items = [
+            item
+            for item in manifest_items
+            if 0.0
+            <= start_seconds - float(item.get("captured_at_seconds", 0) or 0)
+            <= fallback_previous_gap
+            and self._build_keyframe_identity(item) not in excluded_ids
+        ]
+        previous_items.sort(
+            key=lambda item: (
+                -float(item.get("captured_at_seconds", 0) or 0),
+                str(item.get("keyframe_id", "")) or str(item.get("image_path", "")),
+            )
+        )
+        fallback_selected = self._select_visual_keyframes(previous_items, limit=1)
+        return sorted(
+            fallback_selected,
+            key=lambda item: float(item.get("captured_at_seconds", 0) or 0),
+        )
+
+    def _build_keyframe_identity(self, item: dict[str, Any]) -> str:
+        return str(item.get("keyframe_id", "")) or str(item.get("image_path", ""))
+
+    def _select_visual_keyframes(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if not items or limit <= 0:
+            return []
+
+        # Prefer later frames because board writing is usually more complete near the end of a chapter.
+        descending = sorted(
+            items,
+            key=lambda item: float(item.get("captured_at_seconds", 0) or 0),
+            reverse=True,
+        )
+        selected: list[dict[str, Any]] = []
+        min_gap_seconds = 8.0
+
+        for item in descending:
+            capture_time = float(item.get("captured_at_seconds", 0) or 0)
+            if any(abs(capture_time - float(prev.get("captured_at_seconds", 0) or 0)) < min_gap_seconds for prev in selected):
+                continue
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+
+        if len(selected) < limit:
+            selected_ids = {str(item.get("keyframe_id", "")) or str(item.get("image_path", "")) for item in selected}
+            for item in descending:
+                item_id = str(item.get("keyframe_id", "")) or str(item.get("image_path", ""))
+                if item_id in selected_ids:
+                    continue
+                selected.append(item)
+                selected_ids.add(item_id)
+                if len(selected) >= limit:
+                    break
+
+        return sorted(selected, key=lambda item: float(item.get("captured_at_seconds", 0) or 0))
+
+    def _build_image_inputs(self, keyframes: list[dict[str, Any]]) -> list[AIImageInput]:
+        images: list[AIImageInput] = []
+        for item in keyframes:
+            data_url = self._read_keyframe_data_url(item)
+            if not data_url:
+                continue
+            images.append(AIImageInput(image_url=data_url, detail="auto"))
+        return images
+
+    def _build_public_keyframe_urls(self, keyframes: list[dict[str, Any]]) -> list[str]:
+        urls: list[str] = []
+        base_url = f"http://{settings.host}:{settings.port}/media/keyframes"
+        keyframe_root = (settings.data_dir / "keyframes").resolve()
+
+        for item in keyframes:
+            image_path = self._normalize_text(item.get("image_path", ""))
+            if not image_path:
+                continue
+
+            try:
+                resolved = Path(image_path).resolve()
+                relative = resolved.relative_to(keyframe_root)
+            except Exception:
+                continue
+
+            normalized_relative = "/".join(relative.parts)
+            urls.append(f"{base_url}/{normalized_relative}")
+
+        return self._dedupe_texts(urls, limit=len(urls))
+
+    def _read_keyframe_data_url(self, keyframe: dict[str, Any]) -> str:
+        image_path = self._normalize_text(keyframe.get("image_path", ""))
+        mime_type = self._normalize_text(keyframe.get("mime_type", "")) or "image/jpeg"
+        if not image_path:
+            return ""
+
+        try:
+            raw_bytes = open(image_path, "rb").read()
+        except OSError:
+            return ""
+        if not raw_bytes:
+            return ""
+
+        encoded = base64.b64encode(raw_bytes).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+
+    def _merge_detail_with_visual(
+        self,
+        *,
+        base_detail: str,
+        visual_summary: str,
+        detail_appendix: str,
+        board_notes: list[str],
+        formula_points: list[str],
+        diagram_elements: list[str],
+        uncertain_parts: list[str],
+        image_urls: list[str] | None = None,
+    ) -> str:
+        parts: list[str] = []
+        if base_detail:
+            parts.append(base_detail)
+        if visual_summary:
+            parts.append(f"关键帧补充：{visual_summary}")
+        if detail_appendix:
+            parts.append(detail_appendix)
+        if board_notes:
+            parts.append("板书识别：" + "；".join(board_notes))
+        if formula_points:
+            parts.append("公式提取：" + "；".join(formula_points))
+        if diagram_elements:
+            parts.append("图示元素：" + "；".join(diagram_elements))
+        if uncertain_parts:
+            parts.append("识别备注：" + "；".join(uncertain_parts))
+        if image_urls:
+            parts.append("关键帧图片：" + "；".join(image_urls))
+        return "\n".join(part for part in parts if part).strip()
+
+    def _distance_to_interval(self, value: float, start_seconds: float, end_seconds: float) -> float:
+        if start_seconds <= value <= end_seconds:
+            return 0.0
+        if value < start_seconds:
+            return start_seconds - value
+        return value - end_seconds
 
     def _build_rule_outline(self, transcript_blocks: list[TranscriptBlock]) -> list[PlannedChapter]:
         if not transcript_blocks:
@@ -982,6 +1511,7 @@ class SubtitleAnalysisService:
                 "error": "",
             },
             "chapter_analysis_runs": [],
+            "chapter_visual_runs": [],
         }
 
     def _build_detail_from_text(self, text: str, focus: str) -> str:
@@ -1044,6 +1574,20 @@ class SubtitleAnalysisService:
 
     def _normalize_focus(self, value: str) -> str:
         normalized = self._normalize_text(value)
+        english_map = {
+            "concepts": "概念定义",
+            "concept": "概念定义",
+            "methods": "公式方法",
+            "method": "公式方法",
+            "worked examples": "例题讲解",
+            "examples": "例题讲解",
+            "example": "例题讲解",
+            "review": "总结归纳",
+            "orientation": "知识导览",
+        }
+        mapped = english_map.get(normalized.lower(), "")
+        if mapped:
+            return mapped
         return normalized if normalized in self._focus_values else "知识导览"
 
     def _infer_title(self, text: str, index: int) -> str:

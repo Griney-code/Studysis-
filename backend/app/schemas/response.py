@@ -41,6 +41,8 @@ class CollectResponseData(BaseModel):
     notes: NotesPayload
     analysis_status: str = "idle"
     analysis_message: str = ""
+    analysis_request_version: int = 0
+    session_updated_at: str = ""
 
 
 class SessionSummaryItem(BaseModel):
@@ -90,6 +92,7 @@ class SessionDetailResponse(BaseModel):
     notes: NotesPayload
     analysis_status: str = "idle"
     analysis_message: str = ""
+    analysis_request_version: int = 0
     segments: list[StoredSegmentRecord] = Field(default_factory=list)
     created_at: str
     updated_at: str
