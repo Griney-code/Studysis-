@@ -202,7 +202,7 @@ function mergeNotes(previousNotes = {}, incomingNotes = undefined) {
 
 function mergeNoteArrays(previousItems = [], incomingItems = []) {
   if (!incomingItems.length) {
-    return [];
+    return previousItems;
   }
 
   const previousById = new Map(
@@ -254,3 +254,9 @@ function preferNonEmptyString(value, fallback) {
   const next = typeof value === "string" ? value.trim() : "";
   return next || fallback || "";
 }
+
+// 该文件是 Chrome 扩展的 “后台大脑”，核心职责：
+// 1.管理多标签页的会话状态（存储、同步、版本控制）；
+// 2.作为扩展内通信枢纽，处理侧边面板 / 内容脚本的消息请求；
+// 3.提供视频控制、字幕数据获取等核心能力；
+// 4.保证数据一致性（笔记合并、版本校验）和存储整洁（标签页关闭清理）。

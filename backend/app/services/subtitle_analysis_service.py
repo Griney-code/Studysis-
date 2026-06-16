@@ -1278,7 +1278,7 @@ class SubtitleAnalysisService:
         if board_notes:
             parts.append("板书识别：" + "；".join(board_notes))
         if formula_points:
-            parts.append("公式提取：" + "；".join(formula_points))
+            parts.append("公式提取：" + "；".join(f"${fp}$" for fp in formula_points))
         if diagram_elements:
             parts.append("图示元素：" + "；".join(diagram_elements))
         if uncertain_parts:

@@ -1,3 +1,8 @@
+// 浏览器标签事件 → loadActiveSession → 向后台发 GET_SESSION 消息 → 后台返回 session 数据 → renderSession 渲染整个面板 → 各子渲染函数处理细分区域
+const CONFIG = {
+  sessionsUrl: "http://127.0.0.1:8000/api/v1/sessions"
+};
+
 const TEXT = {
   waitingConnection: "等待连接",
   noVideoPage: "尚未检测到视频页面",
@@ -57,17 +62,26 @@ const elements = {
   notesList: document.getElementById("notesList"),
   examList: document.getElementById("examList"),
   notesCount: document.getElementById("notesCount"),
-  examCount: document.getElementById("examCount")
+  examCount: document.getElementById("examCount"),
+  downloadWordButton: document.getElementById("downloadWordButton"),
+  savePdfButton: document.getElementById("savePdfButton")
 };
 
 let currentTabId = null;
+let currentSession = null;
 let openedChapterIds = new Set();
+let exportState = {
+  wordBusy: false,
+  pdfBusy: false
+};
 
 document.addEventListener("DOMContentLoaded", () => {
   void initializePanel();
 });
 
 async function initializePanel() {
+  bindExportActions();
+
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type !== "SESSION_UPDATED") {
       return;
@@ -112,6 +126,8 @@ async function loadActiveSession() {
 
 function renderSession(session) {
   rememberOpenedChapters();
+  currentSession = session;
+  updateExportActions(session);
 
   if (!session) {
     elements.statusBadge.textContent = TEXT.waitingConnection;
@@ -186,6 +202,15 @@ function renderQuickSummary(session) {
   }
 
   elements.quickSummary.textContent = overviewSummary || TEXT.noQuickSummary;
+
+  if (typeof renderMathInElement === "function") {
+    renderMathInElement(elements.quickSummary, {
+      delimiters: [
+        { left: "$", right: "$", display: false },
+        { left: "$$", right: "$$", display: true }
+      ]
+    });
+  }
 }
 
 function isSummaryLoading(session, overviewSummary) {
@@ -299,6 +324,15 @@ function renderStructuredNotes(container, items, emptyText, session) {
     card.appendChild(body);
     container.appendChild(card);
   });
+
+  if (typeof renderMathInElement === "function") {
+    renderMathInElement(container, {
+      delimiters: [
+        { left: "$", right: "$", display: false },
+        { left: "$$", right: "$$", display: true }
+      ]
+    });
+  }
 }
 
 function splitChapterContent(content) {
@@ -603,6 +637,15 @@ function renderList(container, items, emptyText, isLoading = false, loadingCopy 
     wrapper.appendChild(jumpButton);
     container.appendChild(wrapper);
   });
+
+  if (typeof renderMathInElement === "function") {
+    renderMathInElement(container, {
+      delimiters: [
+        { left: "$", right: "$", display: false },
+        { left: "$$", right: "$$", display: true }
+      ]
+    });
+  }
 }
 
 function renderLoadingState(container, title, subtitle) {
@@ -656,4 +699,102 @@ async function jumpToVideo(seconds) {
     tabId: currentTabId,
     seconds
   });
+}
+
+function bindExportActions() {
+  elements.downloadWordButton?.addEventListener("click", () => {
+    void downloadWordDocument();
+  });
+  elements.savePdfButton?.addEventListener("click", () => {
+    void openPrintablePdfView();
+  });
+  updateExportActions(null);
+}
+
+function updateExportActions(session) {
+  const hasSession = Boolean(session?.sessionId);
+
+  if (elements.downloadWordButton) {
+    elements.downloadWordButton.disabled = !hasSession || exportState.wordBusy;
+    elements.downloadWordButton.textContent = exportState.wordBusy ? "Preparing Word..." : "Download Word";
+  }
+
+  if (elements.savePdfButton) {
+    elements.savePdfButton.disabled = !hasSession || exportState.pdfBusy;
+    elements.savePdfButton.textContent = exportState.pdfBusy ? "Opening PDF..." : "Save PDF";
+  }
+}
+
+async function downloadWordDocument() {
+  const sessionId = currentSession?.sessionId;
+  if (!sessionId) {
+    window.alert("No session is available for export yet.");
+    return;
+  }
+
+  exportState = { ...exportState, wordBusy: true };
+  updateExportActions(currentSession);
+
+  try {
+    const response = await fetch(`${CONFIG.sessionsUrl}/${encodeURIComponent(sessionId)}/word`, {
+      method: "GET"
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    const filename = buildExportFilename(currentSession, "docx");
+    triggerBlobDownload(blob, filename);
+  } catch (_error) {
+    window.alert("Export failed. Please try again.");
+  } finally {
+    exportState = { ...exportState, wordBusy: false };
+    updateExportActions(currentSession);
+  }
+}
+
+async function openPrintablePdfView() {
+  const sessionId = currentSession?.sessionId;
+  if (!sessionId) {
+    window.alert("No session is available for export yet.");
+    return;
+  }
+
+  exportState = { ...exportState, pdfBusy: true };
+  updateExportActions(currentSession);
+
+  try {
+    const printableUrl = `${CONFIG.sessionsUrl}/${encodeURIComponent(sessionId)}/printable?autoprint=1`;
+    await chrome.tabs.create({ url: printableUrl });
+  } catch (_error) {
+    window.alert("Export failed. Please try again.");
+  } finally {
+    exportState = { ...exportState, pdfBusy: false };
+    updateExportActions(currentSession);
+  }
+}
+
+function triggerBlobDownload(blob, filename) {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 1000);
+}
+
+function buildExportFilename(session, extension) {
+  const title = String(session?.pageTitle || session?.sessionId || "studysis-notes").trim();
+  const safeTitle = title
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "studysis-notes";
+  return `${safeTitle}.${extension.replace(/^\./, "")}`;
 }

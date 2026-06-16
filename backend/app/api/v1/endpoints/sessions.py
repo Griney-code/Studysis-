@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 from app.schemas.response import ApiResponse, SessionDetailResponse, SessionListResponse
 from app.services.collect_service import collect_service
@@ -73,3 +73,44 @@ async def export_session_markdown(session_id: str) -> PlainTextResponse:
             detail="session not found",
         )
     return PlainTextResponse(content=markdown, media_type="text/markdown; charset=utf-8")
+
+
+@router.get("/{session_id}/word")
+async def export_session_word(session_id: str) -> Response:
+    """Export one session as a Word document."""
+
+    exported = collect_service.export_word(session_id)
+    if exported is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="session not found",
+        )
+
+    payload, filename = exported
+    return Response(
+        content=payload,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@router.get("/{session_id}/printable", response_class=HTMLResponse)
+async def export_session_printable(session_id: str) -> HTMLResponse:
+    """Return a print-friendly HTML export for browser Save-as-PDF flows."""
+
+    exported = collect_service.export_printable_html(session_id)
+    if exported is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="session not found",
+        )
+
+    document, filename = exported
+    return HTMLResponse(
+        content=document,
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+        },
+    )

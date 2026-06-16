@@ -167,6 +167,43 @@ body {
   font-size: 12px;
 }
 
+.export-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.export-button {
+  border: 0;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #ffffff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
+  box-shadow: 0 8px 18px rgba(31, 111, 235, 0.16);
+}
+
+.export-button.secondary {
+  background: #0f172a;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.14);
+}
+
+.export-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.export-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+  box-shadow: none;
+}
+
 .section-head {
   display: flex;
   justify-content: space-between;
@@ -416,4 +453,17 @@ body {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* KaTeX math formula styling */
+.katex {
+  font-size: 1em;
+}
+.katex-display {
+  margin: 0.5em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.katex-display > .katex {
+  font-size: 1.1em;
 }

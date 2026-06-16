@@ -22,6 +22,7 @@ from app.storage.subtitle_store import subtitle_store
 from app.storage.subtitle_debug_store import subtitle_debug_store
 from app.storage.analysis_debug_store import analysis_debug_store
 from app.storage.keyframe_store import keyframe_store
+from app.services.session_export_service import session_export_service
 from app.services.subtitle_analysis_service import subtitle_analysis_service
 
 logger = logging.getLogger(__name__)
@@ -371,7 +372,7 @@ class CollectService:
         if session is None:
             return None
 
-        notes = NotesPayload.model_validate(session.get("notes", {}))
+        notes = self._hydrate_session_notes(session_id=session_id, session=session)
         if notes.markdown:
             return notes.markdown
 
@@ -385,6 +386,26 @@ class CollectService:
                 "",
             ]
         )
+
+    def export_word(self, session_id: str) -> tuple[bytes, str] | None:
+        session = session_store.get(session_id)
+        if session is None:
+            return None
+
+        notes = self._hydrate_session_notes(session_id=session_id, session=session)
+        filename = session_export_service.build_download_filename(session=session, extension="docx")
+        document = session_export_service.build_word_document(session=session, notes=notes)
+        return document, filename
+
+    def export_printable_html(self, session_id: str) -> tuple[str, str] | None:
+        session = session_store.get(session_id)
+        if session is None:
+            return None
+
+        notes = self._hydrate_session_notes(session_id=session_id, session=session)
+        filename = session_export_service.build_download_filename(session=session, extension="html")
+        document = session_export_service.build_printable_html(session=session, notes=notes)
+        return document, filename
 
     def _create_empty_session(self, payload: CollectSegmentRequest, now: str) -> dict[str, Any]:
         return {
@@ -647,10 +668,6 @@ class CollectService:
         ):
             return self._build_processing_notes(existing_notes), False
 
-        instant_preview_notes = subtitle_analysis_service.build_instant_preview_notes(
-            session=session,
-            subtitle_payload=subtitle_payload,
-        )
         next_request_version = int(analysis_meta.get("request_version", 0) or 0) + 1
         stale_reason = self._describe_analysis_refresh_reason(
             has_existing_notes=self._notes_have_content(existing_notes),
@@ -672,7 +689,18 @@ class CollectService:
             "phase": "preview_ready",
             "request_version": next_request_version,
         }
-        return instant_preview_notes, True
+        if self._notes_have_content(existing_notes):
+            notes = existing_notes.model_copy(
+                update={
+                    "backend_message": "检测到新内容，正在后台更新分析...",
+                }
+            )
+        else:
+            notes = subtitle_analysis_service.build_instant_preview_notes(
+                session=session,
+                subtitle_payload=subtitle_payload,
+            )
+        return notes, True
 
     def _build_processing_notes(self, existing_notes: NotesPayload) -> NotesPayload:
         if self._notes_have_content(existing_notes):

@@ -88,7 +88,7 @@ def build_visual_chapter_analysis_user_prompt(payload: dict[str, Any]) -> str:
         "visual_summary": "一句话概括这组关键帧为本章补充了什么板书或图示信息",
         "detail_appendix": "2到4句，解释这些关键帧怎样帮助理解本章，重点补充字幕里没有说清的视觉信息",
         "board_lines": ["按板书原意提取的短句、定义、结论或标题"],
-        "formula_lines": ["图中清晰可见的公式、符号关系或 LaTeX 风格表达"],
+        "formula_lines": ["图中清晰可见的公式、符号关系或 LaTeX 表达式（不含 $ 符号，由系统自动渲染）"],
         "diagram_elements": ["图示中的标签、坐标轴、箭头、变量、结构名称等"],
         "uncertain_parts": ["看不清、只看到一部分、无法确认的内容，明确标注不确定"],
         "exam_points": ["由板书、公式或图示支持的复习考点"],

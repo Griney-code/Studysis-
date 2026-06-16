@@ -1,9 +1,10 @@
+// 这个脚本负责在B站视频页面内采集官方字幕数据，并通过自定义事件向外暴露
 (function () {
   const EVENTS = {
-    request: "studysis:bilibili-subtitle-request",
-    meta: "studysis:bilibili-subtitle-meta",
-    body: "studysis:bilibili-subtitle-body",
-    debug: "studysis:bilibili-subtitle-debug"
+    request: "studysis:bilibili-subtitle-request",  // 触发字幕采集的外部请求事件
+    meta: "studysis:bilibili-subtitle-meta",        // 向外暴露字幕元数据（语言、来源、URL等）
+    body: "studysis:bilibili-subtitle-body",        // 向外暴露字幕内容（标准化后的文本）
+    debug: "studysis:bilibili-subtitle-debug"       // 调试信息事件，包含采集过程中的详细状态和错误信息
   };
   const FLAG = "__studysisBilibiliSubtitleCollectorInstalled__";
 
@@ -23,7 +24,7 @@
 
   bootstrap();
 
-  function bootstrap() {
+  function bootstrap() {  // 初始化与触发时机
     window.addEventListener(EVENTS.request, (event) => {
       const reason = sanitizeText(event?.detail?.reason || "external-request");
       void collectOfficialSubtitles(reason, { force: true });

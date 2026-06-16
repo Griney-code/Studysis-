@@ -5,8 +5,10 @@ const CONFIG = {
   backendTimeoutMs: 15000,
   analysisPollIntervalMs: 2000,
   analysisPollTimeoutMs: 10000,
-  keyframeMaxCount: 8,
-  keyframeMinGapSeconds: 20,
+  keyframeMaxCount: 15,
+  keyframeMinGapSeconds: 45,
+  keyframeSeekMinGapSeconds: 30,
+  keyframePlaybackIntervalSeconds: 90,
   keyframeImageWidth: 960,
   keyframeImageQuality: 0.72
 };
@@ -48,17 +50,20 @@ const state = {
   analysisPollInFlight: false,
   keyframeTimeBuckets: new Set(),
   keyframeCountSent: 0,
-  lastKeyframeSeconds: -999
+  lastKeyframeSeconds: -999,
+  keyframePlaybackTimer: null,
+  subtitleKeyframeSchedule: [],
+  nextScheduleIndex: 0
 };
 
 initCollector();
-
+// 入口函数
 function initCollector() {
-  initBilibiliSubtitleCapture();
-  bindRuntimeMessage();
-  attachBestVideo();
-  observePageVideoChanges();
-  window.addEventListener("beforeunload", detachActiveVideo);
+  initBilibiliSubtitleCapture(); // 初始化B站字幕捕获
+  bindRuntimeMessage(); // 绑定与后台的通信
+  attachBestVideo(); // 绑定视频元素
+  observePageVideoChanges(); // 监控页面视频元素变化
+  window.addEventListener("beforeunload", detachActiveVideo); // 页面卸载前清理
 }
 
 function initBilibiliSubtitleCapture() {
@@ -118,6 +123,15 @@ function bindBilibiliSubtitleEvents() {
     state.officialSubtitleTrackMap.set(normalizedTrack.source_url, normalizedTrack);
     state.officialSubtitleTracks = Array.from(state.officialSubtitleTrackMap.values()).map(stripTrackSignature);
     state.officialSubtitleSent = false;
+
+    // 基于字幕分段重新计算关键帧截取时间表
+    if (state.activeVideo) {
+      state.subtitleKeyframeSchedule = computeSubtitleKeyframeSchedule(
+        state.officialSubtitleTracks,
+        getReliableVideoTime()
+      );
+      state.nextScheduleIndex = 0;
+    }
 
     if (state.activeVideo && !state.snapshotInFlight) {
       void sendLightweightSnapshot("official-subtitle-captured");
@@ -418,6 +432,7 @@ function attachBestVideo() {
       error: ""
     });
     void sendLightweightSnapshot("playback-start");
+    startKeyframePlaybackTimer();
   };
 
   const onPause = () => {
@@ -430,6 +445,7 @@ function attachBestVideo() {
     if (shouldCaptureKeyframe(candidate, "paused")) {
       void sendLightweightSnapshot("paused");
     }
+    stopKeyframePlaybackTimer();
   };
 
   const onEnded = () => {
@@ -439,6 +455,7 @@ function attachBestVideo() {
       backendConnected: state.backendConnected,
       error: ""
     });
+    stopKeyframePlaybackTimer();
   };
 
   const onSeeked = () => {
@@ -448,6 +465,7 @@ function attachBestVideo() {
 
   const onTimeUpdate = () => {
     updatePlaybackClock(candidate.currentTime);
+    checkSubtitleScheduleCapture(candidate);
   };
 
   const onEmptied = () => {
@@ -478,6 +496,9 @@ function attachBestVideo() {
     error: state.backendConnected ? "" : TEXT.waitingBackend
   });
   void sendLightweightSnapshot("video-attached");
+  if (!candidate.paused) {
+    startKeyframePlaybackTimer();
+  }
 }
 
 function detachActiveVideo() {
@@ -485,6 +506,10 @@ function detachActiveVideo() {
     window.clearTimeout(state.attachBestVideoTimer);
     state.attachBestVideoTimer = null;
   }
+
+  stopKeyframePlaybackTimer();
+  state.subtitleKeyframeSchedule = [];
+  state.nextScheduleIndex = 0;
 
   if (state.activeVideo?.__studysisHandlers) {
     const handlers = state.activeVideo.__studysisHandlers;
@@ -689,7 +714,7 @@ function shouldCaptureKeyframe(video, triggerReason) {
     return false;
   }
 
-  if (!["video-attached", "seeked", "paused", "playback-start"].includes(triggerReason)) {
+  if (!["video-attached", "seeked", "paused", "playback-start", "playback-timer", "subtitle-schedule"].includes(triggerReason)) {
     return false;
   }
 
@@ -706,19 +731,103 @@ function shouldCaptureKeyframe(video, triggerReason) {
     return false;
   }
 
+  // video-attached 时若位置太靠前（< 3s），大概率是黑屏/片头，跳过
+  if (triggerReason === "video-attached" && currentTime < 3) {
+    return false;
+  }
+
   const bucket = `${triggerReason}:${Math.floor(currentTime / 10)}`;
   if (state.keyframeTimeBuckets.has(bucket)) {
     return false;
   }
 
-  if (
-    triggerReason !== "seeked"
-    && currentTime - state.lastKeyframeSeconds < CONFIG.keyframeMinGapSeconds
-  ) {
-    return false;
+  // seeked 用较短的间隔限制，避免连续拖动时密集截帧
+  if (triggerReason === "seeked") {
+    if (currentTime - state.lastKeyframeSeconds < CONFIG.keyframeSeekMinGapSeconds) {
+      return false;
+    }
+  } else {
+    if (currentTime - state.lastKeyframeSeconds < CONFIG.keyframeMinGapSeconds) {
+      return false;
+    }
   }
 
   return true;
+}
+
+function computeSubtitleKeyframeSchedule(tracks, currentTime) {
+  const fromSecondsList = [];
+  for (const track of tracks) {
+    for (const seg of (track.segments || [])) {
+      const t = Number(seg?.from_seconds);
+      if (Number.isFinite(t) && t >= Math.max(0, (currentTime || 0) - 5)) {
+        fromSecondsList.push(t);
+      }
+    }
+  }
+  if (!fromSecondsList.length) {
+    return [];
+  }
+
+  fromSecondsList.sort((a, b) => a - b);
+  const count = Math.min(CONFIG.keyframeMaxCount, fromSecondsList.length);
+  if (fromSecondsList.length <= count) {
+    return fromSecondsList;
+  }
+
+  const step = (fromSecondsList.length - 1) / (count - 1);
+  const schedule = [];
+  for (let i = 0; i < count; i++) {
+    schedule.push(fromSecondsList[Math.round(i * step)]);
+  }
+  return schedule;
+}
+
+function checkSubtitleScheduleCapture(video) {
+  if (!state.subtitleKeyframeSchedule.length) {
+    return;
+  }
+  if (state.nextScheduleIndex >= state.subtitleKeyframeSchedule.length) {
+    return;
+  }
+  if (state.keyframeCountSent >= CONFIG.keyframeMaxCount) {
+    return;
+  }
+  const currentTime = getReliableVideoTime();
+  const nextTarget = state.subtitleKeyframeSchedule[state.nextScheduleIndex];
+  if (currentTime >= nextTarget) {
+    state.nextScheduleIndex += 1;
+    if (shouldCaptureKeyframe(video, "subtitle-schedule")) {
+      void sendLightweightSnapshot("subtitle-schedule");
+    }
+  }
+}
+
+function startKeyframePlaybackTimer() {
+  // 如果有字幕调度表，优先使用字幕驱动的截帧
+  if (state.subtitleKeyframeSchedule.length > 0) {
+    return;
+  }
+  if (state.keyframePlaybackTimer) {
+    return;
+  }
+  state.keyframePlaybackTimer = window.setInterval(() => {
+    if (!state.activeVideo || state.activeVideo.paused) {
+      return;
+    }
+    if (state.keyframeCountSent >= CONFIG.keyframeMaxCount) {
+      stopKeyframePlaybackTimer();
+      return;
+    }
+    void sendLightweightSnapshot("playback-timer");
+  }, CONFIG.keyframePlaybackIntervalSeconds * 1000);
+}
+
+function stopKeyframePlaybackTimer() {
+  if (state.keyframePlaybackTimer) {
+    window.clearInterval(state.keyframePlaybackTimer);
+    state.keyframePlaybackTimer = null;
+  }
 }
 
 function captureVideoKeyframe(video, triggerReason) {
@@ -838,6 +947,7 @@ function refreshSessionForPageChange() {
   }
 
   clearAnalysisPolling();
+  stopKeyframePlaybackTimer();
   state.pageUrl = currentPageUrl;
   state.sessionId = getOrCreateSessionId(currentPageUrl);
   state.processedSegments = 0;
@@ -857,6 +967,8 @@ function refreshSessionForPageChange() {
   state.keyframeTimeBuckets = new Set();
   state.keyframeCountSent = 0;
   state.lastKeyframeSeconds = -999;
+  state.subtitleKeyframeSchedule = [];
+  state.nextScheduleIndex = 0;
   requestBilibiliSubtitleCollection("page-change");
 }
 
@@ -1337,3 +1449,11 @@ function getOrCreateSessionId(pageUrl) {
 function buildPageSessionStorageKey(pageUrl) {
   return `studysis:session:${pageUrl}`;
 }
+
+// 核心业务流程总结
+// 1.页面加载后，初始化字幕捕获、视频监听。
+// 2.检测页面中最大的可视视频元素，绑定播放 / 暂停 / 跳转等事件。
+// 3.（B 站页面）捕获字幕元信息，下载字幕内容并标准化。
+// 4.触发上报时机（视频播放 / 暂停 / 跳转 / 字幕更新）时，构建包含视频状态、字幕、关键帧的快照，上报到本地后端。
+// 5.定期轮询后端会话状态，同步分析结果到扩展前台。
+// 6.页面跳转 / 卸载时，清理事件监听、定时器，重置会话状态。

@@ -18,17 +18,17 @@
     "service_worker": "background.js"
   },
   "icons": {
-    "16": "assets/icons/icon128.png",
-    "32": "assets/icons/icon128.png",
-    "48": "assets/icons/icon128.png",
+    "16": "assets/icons/icon16.png",
+    "32": "assets/icons/icon32.png",
+    "48": "assets/icons/icon48.png",
     "128": "assets/icons/icon128.png"
   },
   "action": {
     "default_title": "打开 Studysis 侧边栏",
     "default_icon": {
-      "16": "assets/icons/icon128.png",
-      "32": "assets/icons/icon128.png",
-      "48": "assets/icons/icon128.png",
+      "16": "assets/icons/icon16.png",
+      "32": "assets/icons/icon32.png",
+      "48": "assets/icons/icon48.png",
       "128": "assets/icons/icon128.png"
     }
   },
