@@ -74,15 +74,19 @@ POST http://127.0.0.1:8000/api/v1/collect/segment
 - `playback-start`
 - `seeked`
 - `paused`
+- `playback-timer`（定时器触发）
+- `subtitle-schedule`（字幕调度触发）
 
 并且还有限制条件：
 
-- 单个 session 最多发送 8 张图
+- 单个 session 最多发送 15 张图
 - 同一触发类型按 10 秒时间桶去重
-- 除 `seeked` 之外，默认要求与上一张图至少间隔 20 秒
+- 除 `seeked` 之外，默认要求与上一张图至少间隔 45 秒；`seeked` 至少间隔 30 秒
 - 视频没有足够 `readyState` 或当前帧尺寸不可用时不会截图
 
 所以当前视觉增强效果高度依赖真实播放行为。想让后续章节也拿到板书识别，通常需要在对应章节附近实际播放、暂停或跳转。
+
+此外，扩展还会根据字幕段边界计算关键帧采集调度表（`subtitle-schedule`），在字幕段范围内均匀采样关键帧时间点，以提高章节视觉增强的命中率。
 
 ## 侧边栏更新逻辑
 
@@ -94,6 +98,8 @@ POST http://127.0.0.1:8000/api/v1/collect/segment
 - 如果后面又采到新关键帧，章节区可能会增量刷新
 
 当前前端还会跟踪后端返回的 `analysis_request_version`，用于识别同一个 session 的分析版本变化。
+
+侧边栏还支持导出功能：Word (.docx) 下载和打印友好 HTML 页面（可直接打印或存为 PDF）。
 
 ## 与后端的配合关系
 

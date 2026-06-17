@@ -65,18 +65,20 @@ CLOUD_VISION_API_MODEL=glm-5v-turbo
 
 ## 关键帧采集规则
 
-扩展当前只在少量事件上尝试截取关键帧：
+扩展当前在以下事件上尝试截取关键帧：
 
 - `video-attached`
 - `playback-start`
 - `seeked`
 - `paused`
+- `playback-timer`（定时器触发）
+- `subtitle-schedule`（字幕调度触发）
 
 并且还有几层限制：
 
-- 单个 session 最多发送 8 张关键帧
+- 单个 session 最多发送 15 张关键帧
 - 同一触发类型按 10 秒时间桶去重
-- 除 `seeked` 外，默认至少间隔 20 秒才再截一张
+- 除 `seeked` 外，默认至少间隔 45 秒才再截一张；`seeked` 至少间隔 30 秒
 
 这意味着当前视觉增强质量很依赖实际播放过程中的暂停、跳转和播放位置。如果某一章节附近没有采到合适关键帧，该章节就可能没有稳定的板书识别结果。
 
@@ -213,6 +215,7 @@ python scripts/start_backend.py
 - `backend/data/subtitles_debug/`
 - `backend/data/keyframes/`
 - `backend/data/analysis_debug/`
+- `backend/data/temp_audio/`
 - `backend/exports/`
 
 它们主要用于定位：
@@ -232,6 +235,8 @@ python scripts/start_backend.py
 - `GET /api/v1/sessions/{session_id}/debug`
 - `GET /api/v1/sessions/{session_id}/bootstrap`
 - `GET /api/v1/sessions/{session_id}/markdown`
+- `GET /api/v1/sessions/{session_id}/word`
+- `GET /api/v1/sessions/{session_id}/printable`
 - `GET /media/keyframes/{session_id}/{filename}`
 
 ## 子目录文档

@@ -58,7 +58,7 @@
 - `structured_notes`
 - `detailed_notes`
 
-这部分逻辑主要在 [collect_service.py](/E:/code/studysis/backend/app/services/collect_service.py) 的 `_merge_frozen_note_sections` 和 [subtitle_analysis_service.py](/E:/code/studysis/backend/app/services/subtitle_analysis_service.py) 的章节复用逻辑中。
+这部分逻辑主要在 [collect_service.py](./app/services/collect_service.py) 的 `_merge_frozen_note_sections` 和 [subtitle_analysis_service.py](./app/services/subtitle_analysis_service.py) 的章节复用逻辑中。
 
 ## 异步与版本收敛
 
@@ -104,7 +104,14 @@ backend/
 |  |- schemas/
 |  |- services/
 |  |  |- ai/
+|  |  |  |- base.py
+|  |  |  |- cloud_provider.py
+|  |  |  |- factory.py
+|  |  |  |- local_provider.py
+|  |  |  |- null_provider.py
+|  |  |  `- prompts.py
 |  |  |- collect_service.py
+|  |  |- session_export_service.py
 |  |  `- subtitle_analysis_service.py
 |  |- storage/
 |  `- main.py
@@ -126,6 +133,8 @@ backend/
 - `GET /api/v1/sessions/{session_id}/debug`
 - `GET /api/v1/sessions/{session_id}/bootstrap`
 - `GET /api/v1/sessions/{session_id}/markdown`
+- `GET /api/v1/sessions/{session_id}/word`
+- `GET /api/v1/sessions/{session_id}/printable`
 - `GET /media/keyframes/{session_id}/{filename}`
 
 ## 数据目录
@@ -138,6 +147,7 @@ backend/
 - `data/subtitles_debug/`
 - `data/keyframes/`
 - `data/analysis_debug/`
+- `data/temp_audio/`
 - `exports/`
 
 这些目录主要用于本地开发和调试，默认不应提交到 Git。
